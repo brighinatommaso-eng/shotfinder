@@ -42,8 +42,8 @@ it **shows**, or what is **said in it** — in any language — from a global ho
 |---|---|---|
 | Language | Python 3.11+ | Fastest to build, all libs available |
 | Text in images | Windows built-in OCR (`Windows.Media.Ocr`) via `winrt-*` packages | Zero download, fast, good quality |
-| Visual search | CLIP ViT-B/32 image encoder, ONNX int8, `onnxruntime` | Small, CPU-friendly |
-| Multilingual query | `sentence-transformers/clip-ViT-B-32-multilingual-v1` text encoder, exported to ONNX int8 | Aligned with ViT-B/32 image space; Italian queries work |
+| Visual search | CLIP ViT-B/32 image encoder, ONNX fp32, `onnxruntime` | int8 image quantization dropped cosine to 0.95; fp16 was ~6x slower on CPU |
+| Multilingual query | `sentence-transformers/clip-ViT-B-32-multilingual-v1` text encoder, exported to ONNX int8 | Aligned with ViT-B/32 image space; Italian queries work; int8 keeps cosine at 0.995 |
 | Speech | `faster-whisper`, model `base`, `compute_type="int8"` | Best speed/quality on CPU |
 | Video/audio decode | `ffmpeg` via `imageio-ffmpeg` (bundled binary) | No system install needed |
 | Storage | SQLite single file: FTS5 for text, `sqlite-vec` for vectors | One file, no server |
@@ -97,6 +97,7 @@ shotfinder/
     settings.py        # pick watched folders, toggle video/speech indexing
 tools/
   export_models.py     # one-off: export + quantize ONNX models (dev only)
+  bench_vision.py      # measure CLIP ms/image across threads and batch sizes (dev only)
 tests/
 ```
 
@@ -139,7 +140,10 @@ CREATE VIRTUAL TABLE vec_items USING vec0(embedding float[512]);
   (*heic only if `pillow-heif` loads; otherwise skipped.)
 - Order of work: images first (fast, high value), then video frames, then speech last.
 - **Images:** OCR → insert lines into `text_fts`; CLIP embed → `vec_items`.
-  Skip OCR result if empty. Downscale to max 1600px before OCR, 224px for CLIP.
+  Skip OCR result if empty. Downscale to max 1600px before OCR. CLIP input is
+  RGB, shortest side 224 px with bicubic resize, center crop 224×224, scaled to
+  `[0,1]` with the CLIP mean/std; vectors are L2-normalized (512 floats). Queries
+  use the same tokenizer with `max_length=128`, truncation and padding.
 - **Video frames:** sample 1 frame every 5 s with ffmpeg; compute a cheap
   perceptual hash (e.g. `imagehash.phash` on 64px) and drop frames whose hash
   distance to the last kept frame is < 6. Embed kept frames. Cap at 300 kept frames
@@ -149,8 +153,12 @@ CREATE VIRTUAL TABLE vec_items USING vec0(embedding float[512]);
   segment as an FTS row with `ts = start`. Skip videos with no audio stream.
   Configurable max duration (default 60 min) — longer videos get frames only.
 - **Politeness:** worker thread lowered to `BELOW_NORMAL` priority (via `psutil`);
-  pauses while system CPU > 70% for 10 s; `onnxruntime` and whisper limited to
-  `max(1, cpu_count // 2)` threads. Tray menu can pause/resume.
+  pauses while system CPU > 70% for 10 s. `onnxruntime` uses
+  `onnx_threads` (default `min(4, cpu_count // 2)`), `inter_op_num_threads = 1`,
+  `ORT_SEQUENTIAL` and `session.intra_op.allow_spinning = 0` so an idle indexer
+  does not spin cores. `vision_batch_size` defaults to 1; the batching path stays
+  available for benchmarking. Whisper gets its own thread cap when Phase 4 lands.
+  Tray menu can pause/resume.
 
 ### 5.4 Search
 
@@ -181,8 +189,10 @@ Queries run on a separate thread; UI debounces input by 250 ms.
 1. Settings window: preselect `Pictures\Screenshots`, `Pictures`, `Videos`,
    `Downloads`; user can add/remove.
 2. Model download with progress bar into `%LOCALAPPDATA%\ShotFinder\models`
-   (~CLIP image + multilingual text + whisper base ≈ 350–400 MB). Indexing images
-   with OCR can start before vision/speech models finish downloading.
+   (CLIP image fp32 351.6 MB + multilingual text int8 135.5 MB + tokenizer
+   2.9 MB ≈ 467 MB now; whisper `base` int8 adds ~75 MB in Phase 4). Indexing
+   images with OCR can start before vision/speech models finish downloading;
+   finished images are backfilled with embeddings on the next start.
 3. Initial full scan, then live watching.
 
 ## 6. Error handling

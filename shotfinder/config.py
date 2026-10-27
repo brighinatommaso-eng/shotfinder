@@ -75,6 +75,10 @@ class Config:
     cpu_pause_seconds: float = 10.0
     retry_delay_seconds: float = 30.0
     max_retries: int = 1
+    onnx_threads: int = field(
+        default_factory=lambda: max(1, min(4, (os.cpu_count() or 2) // 2))
+    )
+    vision_batch_size: int = 1
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir).expanduser()
@@ -100,6 +104,14 @@ class Config:
     def logs_dir(self) -> Path:
         return self.data_dir / "logs"
 
+    @property
+    def models_dir(self) -> Path:
+        """ONNX models live beside the index unless SHOTFINDER_MODELS_DIR overrides."""
+        override = os.environ.get("SHOTFINDER_MODELS_DIR")
+        if override:
+            return Path(override).expanduser()
+        return self.data_dir / "models"
+
     def kind_for(self, path: str | Path) -> str | None:
         suffix = Path(path).suffix.lower()
         if suffix in self.image_extensions:
@@ -122,6 +134,8 @@ class Config:
             "cpu_pause_seconds": self.cpu_pause_seconds,
             "retry_delay_seconds": self.retry_delay_seconds,
             "max_retries": self.max_retries,
+            "onnx_threads": self.onnx_threads,
+            "vision_batch_size": self.vision_batch_size,
         }
 
     def save(self) -> None:
@@ -167,6 +181,10 @@ class Config:
         for name in ("ocr_max_dimension", "max_retries"):
             value = raw.get(name)
             if isinstance(value, int) and value >= 0:
+                setattr(config, name, value)
+        for name in ("onnx_threads", "vision_batch_size"):
+            value = raw.get(name)
+            if isinstance(value, int) and value >= 1:
                 setattr(config, name, value)
         for name in ("cpu_pause_threshold", "cpu_pause_seconds", "retry_delay_seconds"):
             value = raw.get(name)

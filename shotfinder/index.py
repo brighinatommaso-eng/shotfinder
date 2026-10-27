@@ -6,7 +6,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import sqlite_vec
 import xxhash
@@ -43,6 +43,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512]);
 """
 
 _HASH_CHUNK = 1024 * 1024
+_VECTOR_DIMENSIONS = 512
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
@@ -264,6 +265,11 @@ class Index:
 
     def _delete_content(self, connection: sqlite3.Connection, file_id: int) -> None:
         connection.execute("DELETE FROM text_fts WHERE file_id = ?", (file_id,))
+        self._delete_vectors(connection, file_id)
+
+    def _delete_vectors(
+        self, connection: sqlite3.Connection, file_id: int
+    ) -> None:
         rows = connection.execute(
             "SELECT rowid FROM vec_meta WHERE file_id = ?", (file_id,)
         ).fetchall()
@@ -294,6 +300,20 @@ class Index:
     def count_files(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) FROM files").fetchone()
         return int(row[0])
+
+    def next_vision_backfill(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Images that finished OCR before the vision models were available."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM files
+             WHERE status = 'done' AND kind = 'image'
+               AND ',' || COALESCE(stages_done, '') || ',' NOT LIKE '%,vision,%'
+             ORDER BY id
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # -- text ----------------------------------------------------------------
 
@@ -373,5 +393,79 @@ class Index:
              LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- vectors -------------------------------------------------------------
+
+    def add_vectors(
+        self,
+        file_id: int,
+        items: Iterable[tuple[float | None, Sequence[float]]],
+        *,
+        expected_hash: str | None = None,
+    ) -> int:
+        """Replace one file's vectors; returns how many were written.
+
+        Vectors must be L2-normalized 512-float embeddings. Replacing makes a
+        retried stage idempotent, and ``expected_hash`` rejects results computed
+        from a file that changed in the meantime.
+        """
+        prepared: list[tuple[float | None, list[float]]] = []
+        for timestamp, vector in items:
+            values = [float(value) for value in vector]
+            if len(values) != _VECTOR_DIMENSIONS:
+                raise ValueError(
+                    f"expected {_VECTOR_DIMENSIONS}-dimensional vector, got {len(values)}"
+                )
+            prepared.append((timestamp, values))
+        if not prepared:
+            return 0
+        with self.conn as connection:
+            if expected_hash is not None:
+                unchanged = connection.execute(
+                    "SELECT 1 FROM files WHERE id = ? AND hash = ?",
+                    (file_id, expected_hash),
+                ).fetchone()
+                if unchanged is None:
+                    return 0
+            self._delete_vectors(connection, file_id)
+            for timestamp, values in prepared:
+                cursor = connection.execute(
+                    "INSERT INTO vec_meta (file_id, ts) VALUES (?, ?)",
+                    (file_id, timestamp),
+                )
+                connection.execute(
+                    "INSERT INTO vec_items (rowid, embedding) VALUES (?, ?)",
+                    (cursor.lastrowid, sqlite_vec.serialize_float32(values)),
+                )
+        return len(prepared)
+
+    def search_vectors(
+        self, vector: Sequence[float], k: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return the *k* nearest rows, ascending by L2 distance.
+
+        ``vec0`` uses L2 by default and stored vectors are L2-normalized, so
+        cosine similarity is ``1 - distance ** 2 / 2``.
+        """
+        if k <= 0:
+            return []
+        values = [float(value) for value in vector]
+        if len(values) != _VECTOR_DIMENSIONS:
+            raise ValueError(
+                f"expected {_VECTOR_DIMENSIONS}-dimensional vector, got {len(values)}"
+            )
+        rows = self.conn.execute(
+            """
+            SELECT knn.rowid AS rowid, m.file_id AS file_id, m.ts AS ts,
+                   f.path AS path, f.kind AS kind, knn.distance AS distance
+              FROM (SELECT rowid, distance FROM vec_items
+                     WHERE embedding MATCH ? AND k = ?) AS knn
+              JOIN vec_meta m ON m.rowid = knn.rowid
+              JOIN files f ON f.id = m.file_id
+             ORDER BY knn.distance
+            """,
+            (sqlite_vec.serialize_float32(values), k),
         ).fetchall()
         return [dict(row) for row in rows]

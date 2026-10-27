@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from PIL import Image
 
+from . import models
 from .config import Config
 from .extractors.ocr import OCRUnavailableError, ocr_image
 from .index import Index
@@ -39,6 +41,7 @@ class Indexer:
         self._outstanding = 0
         self._stats = {"enqueued": 0, "processed": 0, "skipped": 0, "failed": 0}
         self._ocr_error: str | None = None
+        self._vision_missing_logged = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -46,7 +49,9 @@ class Indexer:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self._load_vision_runtime()
         self._recover_pending()
+        self._recover_vision()
         self._thread = threading.Thread(
             target=self._run, name="shotfinder-worker", daemon=True
         )
@@ -124,6 +129,33 @@ class Indexer:
             self._push(int(row["id"]))
         if rows:
             log.info("Recovered %d pending file(s) from the index", len(rows))
+
+    def _load_vision_runtime(self) -> None:
+        """Import onnxruntime from the main thread before any OCR runs.
+
+        Loading the ORT native module inside the worker thread after winrt OCR
+        has initialised COM crashes the process with an access violation, so the
+        import has to happen here. Sessions themselves stay lazy.
+        """
+        if not models.models_ready(self.config.models_dir):
+            return
+        try:
+            from .extractors import vision  # noqa: F401
+        except Exception:
+            log.warning(
+                "Could not load the ONNX runtime; images will be OCR-only",
+                exc_info=True,
+            )
+
+    def _recover_vision(self) -> None:
+        """Queue images indexed before the vision models were available."""
+        if not models.models_ready(self.config.models_dir):
+            return
+        rows = self.index.next_vision_backfill(limit=-1)
+        for row in rows:
+            self._push(int(row["id"]))
+        if rows:
+            log.info("Queued %d image(s) for vision backfill", len(rows))
 
     # -- worker thread -------------------------------------------------------
 
@@ -220,7 +252,13 @@ class Indexer:
 
     def _process(self, file_id: int) -> None:
         row = self.index.get_file(file_id)
-        if row is None or row["status"] != "pending":
+        if row is None:
+            return
+        stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
+        # Backfill rows are already 'done'; only skip them when vision is present.
+        if row["status"] == "done" and "vision" in stages:
+            return
+        if row["status"] not in ("pending", "done"):
             return
         path = Path(row["path"])
         if not path.is_file():
@@ -280,7 +318,38 @@ class Indexer:
                 log.debug("OCR %s: no text found", path)
             stages.add("ocr")
 
-        # Phase 1 stops here; the vision stage is added in Phase 2.
+        if "vision" not in stages:
+            if not models.models_ready(self.config.models_dir):
+                if not self._vision_missing_logged:
+                    log.info(
+                        "Vision models not installed in %s; indexing images with OCR only",
+                        self.config.models_dir,
+                    )
+                    self._vision_missing_logged = True
+            else:
+                try:
+                    from .extractors.vision import embed_images
+
+                    with Image.open(path) as image:
+                        vectors = embed_images(
+                            [image],
+                            models_dir=self.config.models_dir,
+                            threads=self.config.onnx_threads,
+                            batch_size=self.config.vision_batch_size,
+                        )
+                except Exception as exc:
+                    # OCR results stay valid; a later start retries the vision stage.
+                    log.warning("Vision embedding failed for %s: %s", path, exc)
+                else:
+                    written = self.index.add_vectors(
+                        file_id, [(None, vectors[0])], expected_hash=content_hash
+                    )
+                    if written == 0:
+                        # The file changed while embedding; its queued refresh wins.
+                        return
+                    stages.add("vision")
+                    log.debug("Vision %s: embedded", path)
+
         if not self.index.mark_status(
             file_id,
             "done",

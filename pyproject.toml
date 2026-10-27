@@ -11,6 +11,9 @@ dependencies = [
   "watchdog>=4,<7",
   "xxhash>=3.4",
   "Pillow>=10",
+  "numpy>=1.26",
+  "onnxruntime>=1.20",
+  "tokenizers>=0.20",
   "psutil>=5.9",
   "sqlite-vec>=0.1.6",
   "winrt-runtime>=3.2.1,<4; sys_platform == 'win32'",
@@ -25,6 +28,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Dev-only toolchain for tools/export_models.py; never needed at runtime.
+export = [
+  "torch>=2.4",
+  "transformers>=4.40",
+  "sentence-transformers>=3",
+  "onnx>=1.16",
+  "onnxruntime>=1.20",
+  "accelerate>=0.30",
+]
 
 [tool.setuptools.packages.find]
 include = ["shotfinder*"]

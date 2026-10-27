@@ -7,9 +7,11 @@ import logging
 import sys
 from pathlib import Path
 
+from . import models
 from .config import Config
 from .index import Index
 from .logs import setup_logging
+from .search import search
 from .watcher import Watcher
 from .worker import Indexer
 
@@ -80,12 +82,16 @@ def _cmd_search(args: argparse.Namespace) -> int:
     query = " ".join(args.query).strip()
     index = Index(config.db_path)
     try:
-        if query:
-            rows = index.search_text(query, limit=args.limit)
-        else:
-            rows = index.recent_files(limit=args.limit)
+        rows = search(config, index, query, limit=args.limit)
     finally:
         index.close()
+
+    if query and not models.models_ready(config.models_dir):
+        print(
+            "Vision models not installed; showing text matches only. "
+            "Run `python -m shotfinder.cli models download`.",
+            file=sys.stderr,
+        )
 
     if not rows:
         print("No results.")
@@ -94,10 +100,73 @@ def _cmd_search(args: argparse.Namespace) -> int:
     for row in rows:
         timestamp = row.get("ts")
         prefix = f"[{_format_ts(float(timestamp))}] " if timestamp is not None else ""
-        print(f"{prefix}{row['path']}")
+        print(f"[{row['match_type']}] {prefix}{row['path']}")
         snippet = " ".join((row.get("snippet") or "").split())
         if snippet:
             print(f"    {snippet}")
+        if args.explain:
+            fts_rank = row.get("fts_rank")
+            cosine = row.get("cosine")
+            rank_text = "-" if fts_rank is None else str(fts_rank)
+            cosine_text = "-" if cosine is None else f"{float(cosine):.4f}"
+            print(f"    fts_rank={rank_text} cosine={cosine_text}")
+    return 0
+
+
+def _cmd_models_download(args: argparse.Namespace) -> int:
+    config = _config(args)
+    print(f"Models directory: {config.models_dir}")
+    current = {"filename": ""}
+
+    def progress(model: models.ModelFile, done: int, total: int) -> None:
+        if model.filename != current["filename"]:
+            if current["filename"]:
+                print()
+            current["filename"] = model.filename
+        percent = (done * 100 // total) if total else 0
+        print(
+            f"\r{model.filename}: {done / 1048576:.1f}/{total / 1048576:.1f} MB "
+            f"({percent}%)",
+            end="",
+            flush=True,
+        )
+
+    try:
+        paths = models.download_models(config.models_dir, progress=progress)
+    except models.ModelDownloadError as exc:
+        print(f"\nError: {exc}")
+        return 1
+    if current["filename"]:
+        print()
+    for path in paths:
+        print(f"  {path}")
+    print(
+        "Models ready. Run `python -m shotfinder.cli index` to backfill visual embeddings."
+    )
+    return 0
+
+
+def _cmd_models_status(args: argparse.Namespace) -> int:
+    config = _config(args)
+    print(f"Models directory: {config.models_dir}")
+    ready = True
+    for model in models.MODELS:
+        path = config.models_dir / model.filename
+        if path.is_file():
+            actual = path.stat().st_size
+            if actual == model.size:
+                state = f"ok ({actual / 1048576:.1f} MB)"
+            else:
+                state = f"size mismatch: {actual} bytes, expected {model.size}"
+                ready = False
+        else:
+            state = "missing"
+            ready = False
+        print(f"  {model.filename:26} {state}")
+    if ready:
+        print("All models present.")
+    else:
+        print("Run `python -m shotfinder.cli models download`.")
     return 0
 
 
@@ -124,11 +193,32 @@ def build_parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser(
         "search",
         parents=[common],
-        help="Search indexed text (or list recent files when the query is empty).",
+        help="Hybrid text + visual search (or list recent files when empty).",
     )
     search.add_argument("query", nargs="*", help="Words to search for.")
     search.add_argument(
         "--limit", type=int, default=40, help="Maximum number of results (default: 40)."
+    )
+    search.add_argument(
+        "--explain",
+        action="store_true",
+        help="Print the raw FTS rank and CLIP cosine similarity per result.",
+    )
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Download or inspect the ONNX vision models.",
+    )
+    models_sub = models_parser.add_subparsers(dest="models_command", required=True)
+    models_sub.add_parser(
+        "download",
+        parents=[common],
+        help="Download missing models into the data directory.",
+    )
+    models_sub.add_parser(
+        "status",
+        parents=[common],
+        help="Show which models are present.",
     )
     return parser
 
@@ -145,6 +235,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_index(args)
         if args.command == "search":
             return _cmd_search(args)
+        if args.command == "models":
+            if args.models_command == "download":
+                return _cmd_models_download(args)
+            if args.models_command == "status":
+                return _cmd_models_status(args)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130

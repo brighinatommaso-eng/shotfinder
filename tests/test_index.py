@@ -185,3 +185,26 @@ def test_recent_files_only_lists_done_files(index: Index, tmp_path: Path) -> Non
     recent = index.recent_files(10)
     assert [row["file_id"] for row in recent] == [first_id]
     assert second_id not in {row["file_id"] for row in recent}
+
+
+def test_vision_backfill_lists_only_done_images_without_vectors(
+    index: Index, tmp_path: Path
+) -> None:
+    done_ocr = _make_file(tmp_path / "ocr-only.png", b"ocr only")
+    done_vision = _make_file(tmp_path / "embedded.png", b"embedded")
+    pending = _make_file(tmp_path / "pending.png", b"pending")
+    video = _make_file(tmp_path / "clip.mp4", b"video")
+
+    ocr_id, _ = index.upsert_file(done_ocr, "image")
+    vision_id, _ = index.upsert_file(done_vision, "image")
+    pending_id, _ = index.upsert_file(pending, "image")
+    video_id, _ = index.upsert_file(video, "video")
+
+    index.mark_status(ocr_id, "done", stages_done="ocr")
+    index.mark_status(vision_id, "done", stages_done="ocr,vision")
+    index.mark_status(video_id, "done", stages_done="frames")
+
+    backfill = index.next_vision_backfill(10)
+
+    assert [row["id"] for row in backfill] == [ocr_id]
+    assert pending_id not in {row["id"] for row in backfill}
