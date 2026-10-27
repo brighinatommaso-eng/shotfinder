@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shotfinder"
+version = "0.1.0"
+description = "Local, offline search for screenshots, photos and videos"
+requires-python = ">=3.11"
+dependencies = [
+  "watchdog>=4,<7",
+  "xxhash>=3.4",
+  "Pillow>=10",
+  "psutil>=5.9",
+  "sqlite-vec>=0.1.6",
+  "winrt-runtime>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Globalization>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Media.Ocr>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Storage>=3.2.1,<4; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams>=3.2.1,<4; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["shotfinder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "slow: tests that load CLIP or whisper models",
+]
