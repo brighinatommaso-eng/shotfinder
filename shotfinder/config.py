@@ -199,6 +199,7 @@ class Config:
     )
     vision_batch_size: int = 1
     min_visual_similarity: float = 0.25
+    index_cloud_only_files: bool = False
     exclude_dir_names: set[str] = field(
         default_factory=lambda: set(DEFAULT_EXCLUDED_DIR_NAMES)
     )
@@ -264,6 +265,7 @@ class Config:
             "onnx_threads": self.onnx_threads,
             "vision_batch_size": self.vision_batch_size,
             "min_visual_similarity": self.min_visual_similarity,
+            "index_cloud_only_files": self.index_cloud_only_files,
             "exclude_dir_names": sorted(self.exclude_dir_names),
         }
 
@@ -333,4 +335,7 @@ class Config:
         similarity = raw.get("min_visual_similarity")
         if isinstance(similarity, (int, float)) and 0.0 <= float(similarity) <= 1.0:
             config.min_visual_similarity = float(similarity)
+        cloud_only = raw.get("index_cloud_only_files")
+        if isinstance(cloud_only, bool):
+            config.index_cloud_only_files = cloud_only
         return config

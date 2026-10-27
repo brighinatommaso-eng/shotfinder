@@ -11,6 +11,8 @@ from typing import Any, Iterable, Sequence
 import sqlite_vec
 import xxhash
 
+from .exclusions import CLOUD_ONLY_REASON
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY,
@@ -138,8 +140,14 @@ class Index:
                 "SELECT * FROM files WHERE path = ?", (key,)
             ).fetchone()
             if existing is not None:
-                # Fast path: an unchanged file never needs its 1 MB re-read.
-                if (
+                cloud_only = (
+                    existing["status"] == "skipped"
+                    and existing["error"] == CLOUD_ONLY_REASON
+                )
+                # Fast path: an unchanged, already-indexed file never needs its
+                # 1 MB re-read. A cloud-only row skips it so a hydrated file is
+                # noticed even when its size and mtime did not change.
+                if not cloud_only and (
                     existing["size"] == stat.st_size
                     and existing["mtime"] == stat.st_mtime
                 ):
@@ -154,14 +162,19 @@ class Index:
                     return int(existing["id"]), False
 
                 digest = compute_file_hash(path)
-                if existing["hash"] == digest and existing["size"] == stat.st_size:
+                if (
+                    not cloud_only
+                    and existing["hash"] == digest
+                    and existing["size"] == stat.st_size
+                ):
                     connection.execute(
                         "UPDATE files SET mtime = ?, created = ?, kind = ? WHERE id = ?",
                         (stat.st_mtime, stat.st_ctime, kind, existing["id"]),
                     )
                     return int(existing["id"]), False
 
-                # Same path, different content: invalidate every derived row.
+                # Same path, different content (or a cloud row that is now
+                # readable): invalidate every derived row.
                 self._delete_content(connection, int(existing["id"]))
                 connection.execute(
                     """
@@ -218,6 +231,58 @@ class Index:
                 ),
             )
             return int(cursor.lastrowid), True
+
+    def mark_cloud_only(self, path: str | Path, kind: str) -> int:
+        """Record a cloud placeholder without opening or hashing it.
+
+        The row keeps an empty hash (for a new file) so it can never be mistaken
+        for real content. A later scan that finds the file hydrated goes through
+        :meth:`upsert_file`, which treats the row as unindexed.
+        """
+        path = _normalise_path(path)
+        stat = path.stat()
+        key = str(path)
+        with self.conn as connection:
+            existing = connection.execute(
+                "SELECT * FROM files WHERE path = ?", (key,)
+            ).fetchone()
+            if existing is None:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO files
+                        (path, hash, kind, size, mtime, created, status, error, stages_done)
+                    VALUES (?, '', ?, ?, ?, ?, 'skipped', ?, '')
+                    """,
+                    (
+                        key,
+                        kind,
+                        stat.st_size,
+                        stat.st_mtime,
+                        stat.st_ctime,
+                        CLOUD_ONLY_REASON,
+                    ),
+                )
+                return int(cursor.lastrowid)
+            if existing["status"] == "done":
+                # It was indexed while hydrated; keep the searchable content.
+                return int(existing["id"])
+            connection.execute(
+                """
+                UPDATE files
+                   SET kind = ?, size = ?, mtime = ?, created = ?,
+                       status = 'skipped', error = ?
+                 WHERE id = ?
+                """,
+                (
+                    kind,
+                    stat.st_size,
+                    stat.st_mtime,
+                    stat.st_ctime,
+                    CLOUD_ONLY_REASON,
+                    existing["id"],
+                ),
+            )
+            return int(existing["id"])
 
     def find_by_hash(self, digest: str) -> dict[str, Any] | None:
         row = self.conn.execute(

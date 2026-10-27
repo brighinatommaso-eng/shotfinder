@@ -15,7 +15,13 @@ from PIL import Image
 
 from . import models
 from .config import Config
-from .exclusions import MIN_IMAGE_DIMENSION, Exclusions, is_small_image
+from .exclusions import (
+    CLOUD_ONLY_REASON,
+    MIN_IMAGE_DIMENSION,
+    Exclusions,
+    is_cloud_only,
+    is_small_image,
+)
 from .extractors.ocr import OCRUnavailableError, ocr_image
 from .index import Index
 
@@ -113,6 +119,11 @@ class Indexer:
         path = Path(path)
         kind = self.config.kind_for(path)
         if kind is None:
+            return False
+        if not self.config.index_cloud_only_files and is_cloud_only(path):
+            # Hashing would trigger a OneDrive download. Record the placeholder
+            # and let a later scan re-check it once the user hydrates it.
+            self.index.mark_cloud_only(path, kind)
             return False
         file_id, needs_indexing = self.index.upsert_file(path, kind)
         if needs_indexing:
@@ -324,6 +335,16 @@ class Indexer:
         path = Path(row["path"])
         content_hash = row["hash"]
         stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
+
+        if not self.config.index_cloud_only_files and is_cloud_only(path):
+            # The file was hydrated when queued and dehydrated since. Opening
+            # it now would pull it from the cloud.
+            self.index.mark_status(
+                file_id, "skipped", CLOUD_ONLY_REASON, expected_hash=content_hash
+            )
+            self._count("skipped")
+            log.debug("Skipped %s: cloud-only placeholder", path)
+            return
 
         try:
             with Image.open(path) as probe:

@@ -53,6 +53,17 @@ def test_min_visual_similarity_defaults_and_roundtrips(tmp_path: Path) -> None:
     assert Config.load(tmp_path).min_visual_similarity == 0.31
 
 
+def test_cloud_only_indexing_is_off_by_default_and_roundtrips(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    assert config.index_cloud_only_files is False
+
+    config.index_cloud_only_files = True
+    config.save()
+
+    assert Config.load(tmp_path).index_cloud_only_files is True
+
+
+
 def test_defaults_follow_the_windows_known_folder_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

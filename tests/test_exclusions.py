@@ -6,11 +6,16 @@ from pathlib import Path
 
 from PIL import Image
 
+import shotfinder.index as index_module
 from shotfinder.config import Config
 from shotfinder.exclusions import (
+    CLOUD_ONLY_REASON,
+    FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
     MIN_IMAGE_DIMENSION,
     Exclusions,
     has_project_marker,
+    is_cloud_only,
     is_small_image,
 )
 from shotfinder.index import Index
@@ -146,3 +151,110 @@ def test_worker_marks_tiny_images_skipped_before_ocr(tmp_path: Path) -> None:
         assert indexer.stats["skipped"] == 1
     finally:
         index.close()
+
+
+class _FakeStat:
+    def __init__(self, attributes: int) -> None:
+        self.st_file_attributes = attributes
+
+
+def test_cloud_only_reads_the_windows_file_attributes() -> None:
+    assert is_cloud_only("ignored", _FakeStat(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS))
+    assert is_cloud_only("ignored", _FakeStat(FILE_ATTRIBUTE_OFFLINE))
+    assert is_cloud_only(
+        "ignored", _FakeStat(FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+    )
+    assert not is_cloud_only("ignored", _FakeStat(0x20))
+
+
+def test_cloud_only_uses_a_mocked_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "placeholder.png"
+    monkeypatch.setattr(
+        "shotfinder.exclusions.os.stat",
+        lambda candidate: _FakeStat(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+    )
+
+    assert is_cloud_only(path)
+
+
+def test_enqueue_marks_cloud_only_without_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "media"
+    path = _image(root / "cloud.png")
+    config = _config(tmp_path, root)
+    index = Index(config.db_path)
+    try:
+        def fail_hash(candidate: object) -> str:
+            raise AssertionError("a cloud placeholder must never be hashed")
+
+        original_hash = index_module.compute_file_hash
+        monkeypatch.setattr(index_module, "compute_file_hash", fail_hash)
+        monkeypatch.setattr("shotfinder.worker.is_cloud_only", lambda candidate: True)
+
+        indexer = Indexer(config, index)
+        assert indexer.enqueue(path) is False
+
+        row = index.find_by_path(path)
+        assert row is not None
+        assert row["status"] == "skipped"
+        assert row["error"] == CLOUD_ONLY_REASON
+        assert row["hash"] == ""
+
+        # The user downloads the file: the next scan must index it.
+        monkeypatch.setattr(index_module, "compute_file_hash", original_hash)
+        monkeypatch.setattr("shotfinder.worker.is_cloud_only", lambda candidate: False)
+        assert indexer.enqueue(path) is True
+        row = index.find_by_path(path)
+        assert row["status"] == "pending"
+        assert row["hash"] != ""
+    finally:
+        index.close()
+
+
+def test_cloud_only_files_can_be_indexed_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "media"
+    path = _image(root / "cloud.png")
+    config = _config(tmp_path, root)
+    config.index_cloud_only_files = True
+    index = Index(config.db_path)
+    try:
+        monkeypatch.setattr("shotfinder.worker.is_cloud_only", lambda candidate: True)
+        indexer = Indexer(config, index)
+
+        assert indexer.enqueue(path) is True
+        assert index.find_by_path(path)["status"] == "pending"
+    finally:
+        index.close()
+
+
+def test_worker_skips_a_file_that_became_cloud_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "media"
+    path = _image(root / "dehydrated.png")
+    config = _config(tmp_path, root)
+    index = Index(config.db_path)
+    try:
+        file_id, _ = index.upsert_file(path, "image")
+        monkeypatch.setattr("shotfinder.worker.is_cloud_only", lambda candidate: True)
+
+        def fail_open(candidate: object) -> None:
+            raise AssertionError("a cloud placeholder must never be opened")
+
+        monkeypatch.setattr("shotfinder.worker.Image.open", fail_open)
+        indexer = Indexer(config, index)
+
+        indexer._process_image(index.get_file(file_id))
+
+        row = index.get_file(file_id)
+        assert row["status"] == "skipped"
+        assert row["error"] == CLOUD_ONLY_REASON
+        assert indexer.stats["skipped"] == 1
+    finally:
+        index.close()
+

@@ -19,6 +19,25 @@ from PIL import Image
 from .config import Config
 
 MIN_IMAGE_DIMENSION = 128
+CLOUD_ONLY_REASON = "cloud-only"
+
+# Windows file attributes: reading either kind of placeholder triggers a
+# OneDrive/cloud download, so they must never be opened or hashed.
+FILE_ATTRIBUTE_OFFLINE = 0x1000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+
+
+def is_cloud_only(path: str | Path, stat_result: object | None = None) -> bool:
+    """True when *path* is a cloud placeholder that must not be read."""
+    try:
+        result = stat_result if stat_result is not None else os.stat(path)
+    except OSError:
+        return False
+    attributes = getattr(result, "st_file_attributes", 0) or 0
+    return bool(
+        attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+    )
+
 
 
 def _norm(path: str | Path) -> str:
