@@ -98,6 +98,19 @@ def _sessions(
         return cached
 
 
+def _prepare_image(image: Image.Image) -> Image.Image:
+    """Orient the image and let libjpeg decode JPEGs at a reduced scale.
+
+    ``draft`` only has an effect before the pixels are loaded, so it runs first.
+    A 1/8-scale decode of a 12 MP photo still leaves ~500 px on the short side,
+    well above the 224 px CLIP input, while cutting decode work substantially.
+    """
+    if image.format == "JPEG":
+        image.draft("RGB", (IMAGE_SIZE * 2, IMAGE_SIZE * 2))
+    # Phone photos carry orientation in EXIF; honour it like the OCR stage.
+    return ImageOps.exif_transpose(image).convert("RGB")
+
+
 def preprocess_images(images: Sequence[Image.Image]) -> np.ndarray:
     """CLIP ViT-B/32 preprocessing: RGB, shortest side 224 bicubic, center crop."""
     if not images:
@@ -108,9 +121,7 @@ def preprocess_images(images: Sequence[Image.Image]) -> np.ndarray:
     batch = np.empty((len(images), 3, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)
 
     for index, image in enumerate(images):
-        # Phone photos carry orientation in EXIF; honour it like the OCR stage.
-        image = ImageOps.exif_transpose(image)
-        image = image.convert("RGB")
+        image = _prepare_image(image)
         width, height = image.size
         if width < 1 or height < 1:
             raise ValueError("image has an empty size")

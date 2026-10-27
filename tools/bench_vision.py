@@ -5,22 +5,23 @@ Usage::
     python tools/bench_vision.py "C:\\Users\\me\\Pictures\\Screenshots"
     python tools/bench_vision.py <folder> --limit 32 --reps 5 --models-dir models
 
-Reports MEDIAN milliseconds per image over repeated runs. Timings include
-preprocessing (decode is outside the loop, resize/crop/normalize is inside),
-because that is the per-image cost the indexer pays. Chrome open makes the
-numbers noisy; compare medians, not single runs.
+Reports MEDIAN milliseconds per image over repeated runs. Each timed pass
+opens, decodes and preprocesses the file and then runs the encoder, so the
+number is the real per-image indexing cost, not just inference. Chrome open
+makes the numbers noisy; compare medians, not single runs.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import statistics
 import sys
 import time
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -40,7 +41,7 @@ def parse_int_list(value: str) -> list[int]:
     return [int(item) for item in value.replace(",", " ").split() if item.strip()]
 
 
-def load_images(folder: Path, limit: int) -> list[Image.Image]:
+def find_images(folder: Path, limit: int) -> list[Path]:
     paths = sorted(
         path
         for path in folder.iterdir()
@@ -49,23 +50,27 @@ def load_images(folder: Path, limit: int) -> list[Image.Image]:
     if not paths:
         raise SystemExit(f"No images found in {folder}")
     paths = paths[:limit]
-    images: list[Image.Image] = []
+    megapixels = 0.0
     for path in paths:
         with Image.open(path) as image:
-            images.append(ImageOps.exif_transpose(image).convert("RGB"))
-    megapixels = sum(image.width * image.height for image in images) / 1e6
-    print(f"Loaded {len(images)} image(s) from {folder} ({megapixels:.1f} MP total)")
-    return images
+            megapixels += image.width * image.height / 1e6
+    print(f"Found {len(paths)} image(s) in {folder} ({megapixels:.1f} MP total)")
+    return paths
 
 
-def embed_batch(session, images: list[Image.Image], batch_size: int) -> None:
-    for start in range(0, len(images), batch_size):
-        pixels = preprocess_images(images[start : start + batch_size])
+def embed_paths(session, paths: list[Path], batch_size: int) -> None:
+    for start in range(0, len(paths), batch_size):
+        with contextlib.ExitStack() as stack:
+            images = [
+                stack.enter_context(Image.open(path))
+                for path in paths[start : start + batch_size]
+            ]
+            pixels = preprocess_images(images)
         session.run(["image_embeds"], {"pixel_values": pixels})
 
 
 def measure(
-    images: list[Image.Image],
+    paths: list[Path],
     model_path: Path,
     *,
     threads: int,
@@ -75,13 +80,13 @@ def measure(
 ) -> float:
     session = create_session(model_path, threads=threads, allow_spinning=allow_spinning)
     try:
-        embed_batch(session, images[:2], batch_size)  # warm up allocations
+        embed_paths(session, paths[:2], batch_size)  # warm up allocations
         samples: list[float] = []
         for _ in range(reps):
             started = time.perf_counter()
-            embed_batch(session, images, batch_size)
+            embed_paths(session, paths, batch_size)
             elapsed = time.perf_counter() - started
-            samples.append(elapsed * 1000.0 / len(images))
+            samples.append(elapsed * 1000.0 / len(paths))
         return statistics.median(samples)
     finally:
         del session
@@ -118,17 +123,17 @@ def main(argv: list[str] | None = None) -> int:
 
     threads = parse_int_list(args.threads)
     batches = parse_int_list(args.batches)
-    images = load_images(args.folder, args.limit)
+    paths = find_images(args.folder, args.limit)
 
     print(f"Model: {model_path} ({model_path.stat().st_size / 1e6:.1f} MB)")
     print(f"Config default: onnx_threads={config.onnx_threads}, vision_batch_size={config.vision_batch_size}")
-    print(f"Median of {args.reps} run(s), spinning off\n")
+    print(f"Median of {args.reps} run(s), spinning off, decode included\n")
 
     results: dict[tuple[int, int], float] = {}
     for thread_count in threads:
         for batch_size in batches:
             median = measure(
-                images,
+                paths,
                 model_path,
                 threads=thread_count,
                 batch_size=batch_size,
@@ -148,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     for allow_spinning in (False, True):
         median = measure(
-            images,
+            paths,
             model_path,
             threads=default_threads,
             batch_size=default_batch,
