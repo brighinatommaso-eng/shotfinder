@@ -6,15 +6,16 @@ ShotFinder indexes your folders into a single local SQLite file, then searches i
 
 ## Status
 
-Phase 2 of 6. Working today, from the command line:
+Phase 3 of 6. Working today:
 
 - Folder scanning, live file watching, hash-based move/rename detection.
 - Windows OCR on images, stored in full-text search.
 - CLIP visual embeddings for images, stored in a local vector index.
 - Hybrid search that merges full-text and visual results (reciprocal rank fusion), with `--explain` showing the raw text rank and cosine similarity per result.
-- Model download with SHA-256 verification and resume.
+- A tray app with a Spotlight-style search window, keyboard navigation, preview, copy and reveal.
+- Model download with SHA-256 verification and resume, from the CLI or the tray.
 
-Not built yet: the tray app and search window (Phase 3), video frame and speech indexing (Phase 4), packaging and first-run setup (Phases 5-6). Videos are detected and skipped with a note; the UI does not exist, so everything is CLI-only for now.
+Not built yet: video frame and speech indexing (Phase 4), packaging and first-run setup (Phases 5-6). Videos are detected and listed, but no frames or audio are read yet and the preview opens them in your own player.
 
 ## Requirements
 
@@ -39,9 +40,35 @@ python -m shotfinder.cli models download
 
 That fetches about 467 MB into `%LOCALAPPDATA%\ShotFinder\models`: the CLIP image encoder (335 MB), the multilingual text encoder (129 MB) and its tokenizer (3 MB). Files are verified against pinned SHA-256 hashes and can resume after an interruption. `python -m shotfinder.cli models status` shows what is present.
 
-Without the models, indexing still runs OCR and search still returns text matches.
+Without the models, indexing still runs OCR and search still returns text matches. The tray app offers to download them too: when they are missing it shows a notification, and the tray menu has a "Download models" item with progress in the tooltip. Text search works while that runs.
 
-## Use
+## Run the app
+
+```powershell
+python -m shotfinder
+```
+
+ShotFinder starts in the tray and indexes in the background; the tooltip shows `Idle`, `Indexing 132/2,048`, `Paused` or `Models missing`. `Ctrl+Alt+Space` opens the search window, and so do the tray icon and its menu. A second launch does not start a second copy: it asks the running one to show its window.
+
+If another app already owns `Ctrl+Alt+Space`, ShotFinder tells you once and stays usable from the tray. The menu also pauses or resumes indexing, opens the data folder and quits.
+
+| Key | Action |
+| --- | --- |
+| Arrows | Move between results |
+| `Enter` | Preview the selected file |
+| `Ctrl+Enter` | Show the file in Explorer |
+| `Ctrl+C` | Copy the image to the clipboard |
+| `Esc` | Close the window |
+
+Typing is debounced by 250 ms and searches run off the UI thread, so a slow query never blocks the window. An empty query lists recent files; a query with no hits explains what was searched instead of showing a blank panel.
+
+![Empty state](docs/screenshots/empty-state.png)
+
+![Results](docs/screenshots/results.png)
+
+![Preview](docs/screenshots/preview.png)
+
+## Use from the command line
 
 ```powershell
 # Scan the watched folders and index new or changed files
@@ -58,9 +85,11 @@ python -m shotfinder.cli search
 
 The first run watches the folders that exist among the Windows Pictures, Screenshots, Videos and Downloads known folders, so OneDrive redirection and localised folder names are handled. To change them, edit `watched_folders` in `%LOCALAPPDATA%\ShotFinder\config.json` and run `index` again. `--data-dir` points the CLI at a different data directory.
 
+Files that exist only in the cloud are never downloaded or read: they are marked `skipped` with the reason `cloud-only` and picked up on a later scan once they are on disk.
+
 ## Privacy
 
-Indexing and search are entirely local. The database, models and logs live under `%LOCALAPPDATA%\ShotFinder`; the only network access is the one-time model download. No telemetry, no accounts, no uploads.
+Indexing and search are entirely local. The database, models, logs and thumbnail cache live under `%LOCALAPPDATA%\ShotFinder`; the only network access is the one-time model download. No telemetry, no accounts, no uploads.
 
 ## Built for Hack Club Stardance
 
