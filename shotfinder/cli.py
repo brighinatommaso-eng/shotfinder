@@ -33,16 +33,24 @@ def _format_ts(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _warn_missing_folders(config: Config) -> None:
+    for folder in config.missing_watched_folders():
+        log.warning("Watched folder does not exist: %s", folder)
+        print(f"Warning: watched folder does not exist: {folder}", file=sys.stderr)
+
+
 def _cmd_index(args: argparse.Namespace) -> int:
     config = _config(args)
     config.save()
+    _warn_missing_folders(config)
 
     print(f"Data directory: {config.data_dir}")
     print(f"Config: {config.config_path}")
     print("Watched folders:")
     if config.watched_folders:
         for folder in config.watched_folders:
-            print(f"  {folder}")
+            suffix = "" if folder.is_dir() else "  (missing)"
+            print(f"  {folder}{suffix}")
     else:
         print("  (none - add folders to config.json)")
 
@@ -79,6 +87,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_search(args: argparse.Namespace) -> int:
     config = _config(args)
+    _warn_missing_folders(config)
     query = " ".join(args.query).strip()
     index = Index(config.db_path)
     try:

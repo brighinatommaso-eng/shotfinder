@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +15,44 @@ APP_NAME = "ShotFinder"
 DEFAULT_HOTKEY = "ctrl+alt+space"
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".heic"})
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})
+
+# Windows Known Folder IDs (FOLDERID_*). OneDrive redirection and localised
+# folder names are handled by the shell, so never guess "Pictures" by name.
+FOLDERID_PICTURES = "{33E28130-4E1E-4676-835A-98395C3BC3BB}"
+FOLDERID_SCREENSHOTS = "{B7BEDE81-DF94-4682-A7D8-57A52620B86F}"
+FOLDERID_VIDEOS = "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}"
+FOLDERID_DOWNLOADS = "{374DE290-123F-4565-9164-39C4925E467B}"
+DEFAULT_WATCHED_FOLDER_IDS = (
+    FOLDERID_SCREENSHOTS,
+    FOLDERID_PICTURES,
+    FOLDERID_VIDEOS,
+    FOLDERID_DOWNLOADS,
+)
+
+if os.name == "nt":  # pragma: no cover - exercised on Windows only
+    import ctypes
+    import uuid
+    from ctypes import wintypes
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    _shell32 = ctypes.windll.shell32
+    _shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(_GUID),
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    _shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    _ole32 = ctypes.windll.ole32
+    _ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    _ole32.CoTaskMemFree.restype = None
 DEFAULT_EXCLUDED_DIR_NAMES = frozenset(
     {
         "Library",
@@ -49,24 +87,76 @@ def default_data_dir() -> Path:
     return base / APP_NAME
 
 
-def default_watched_folders() -> list[Path]:
-    """Return the first-run folder selection from section 5.6, keeping only existing folders."""
-    home = Path.home()
-    candidates = (
-        home / "Pictures" / "Screenshots",
-        home / "Pictures",
-        home / "Videos",
-        home / "Downloads",
-    )
+def _existing_unique(candidates: Iterable[Path]) -> list[Path]:
+    """Keep the existing folders, in order, without duplicates."""
     folders: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
-        key = os.path.normcase(os.path.abspath(str(candidate)))
+        key = os.path.normcase(os.path.abspath(os.fspath(candidate)))
         if key in seen or not candidate.is_dir():
             continue
         seen.add(key)
         folders.append(candidate)
     return folders
+
+
+def known_folder(folder_id: str) -> Path | None:
+    """Resolve a Windows Known Folder ID through SHGetKnownFolderPath."""
+    if os.name != "nt":
+        return None
+    guid = _GUID.from_buffer_copy(uuid.UUID(folder_id).bytes_le)
+    raw = ctypes.c_wchar_p()
+    try:
+        result = _shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(raw)
+        )
+        if result != 0 or not raw.value:
+            log.warning(
+                "Could not resolve known folder %s (HRESULT 0x%08X)",
+                folder_id,
+                result & 0xFFFFFFFF,
+            )
+            return None
+        return Path(raw.value)
+    finally:
+        if raw:
+            _ole32.CoTaskMemFree(ctypes.cast(raw, ctypes.c_void_p))
+
+
+def default_watched_folders() -> list[Path]:
+    """Resolve the first-run folders through the Windows Known Folder API."""
+    return _existing_unique(
+        folder
+        for folder in (
+            known_folder(folder_id) for folder_id in DEFAULT_WATCHED_FOLDER_IDS
+        )
+        if folder is not None
+    )
+
+
+def legacy_default_watched_folders() -> list[Path]:
+    """The hardcoded English names shipped before the Known Folder API.
+
+    Only used to recognise configs that were saved with those wrong defaults.
+    """
+    home = Path.home()
+    return _existing_unique(
+        (
+            home / "Pictures" / "Screenshots",
+            home / "Pictures",
+            home / "Videos",
+            home / "Downloads",
+        )
+    )
+
+
+def _same_folders(left: Iterable[Path], right: Iterable[Path]) -> bool:
+    def keys(folders: Iterable[Path]) -> set[str]:
+        return {
+            os.path.normcase(os.path.abspath(os.fspath(folder))) for folder in folders
+        }
+
+    return keys(left) == keys(right)
 
 
 def _normalise_extensions(values: Any, fallback: frozenset[str]) -> set[str]:
@@ -156,6 +246,10 @@ class Config:
     def is_supported(self, path: str | Path) -> bool:
         return self.kind_for(path) is not None
 
+    def missing_watched_folders(self) -> list[Path]:
+        """Configured folders that do not exist (never skipped silently)."""
+        return [folder for folder in self.watched_folders if not folder.is_dir()]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "watched_folders": [str(folder) for folder in self.watched_folders],
@@ -206,6 +300,16 @@ class Config:
                 for folder in folders
                 if isinstance(folder, str) and folder.strip()
             ]
+            if config.watched_folders and _same_folders(
+                config.watched_folders, legacy_default_watched_folders()
+            ):
+                migrated = default_watched_folders()
+                if migrated and not _same_folders(config.watched_folders, migrated):
+                    log.info(
+                        "Migrating watched folders from the old English defaults to %s",
+                        ", ".join(str(folder) for folder in migrated),
+                    )
+                    config.watched_folders = migrated
         config.image_extensions = _normalise_extensions(raw.get("image_extensions"), IMAGE_EXTENSIONS)
         config.video_extensions = _normalise_extensions(raw.get("video_extensions"), VIDEO_EXTENSIONS)
         config.exclude_dir_names = _normalise_dir_names(raw.get("exclude_dir_names"))

@@ -186,8 +186,9 @@ Queries run on a separate thread; UI debounces input by 250 ms.
 
 ### 5.6 First run
 
-1. Settings window: preselect `Pictures\Screenshots`, `Pictures`, `Videos`,
-   `Downloads`; user can add/remove.
+1. Settings window: preselect the Pictures, Screenshots, Videos and Downloads
+   folders resolved through the Windows Known Folder API (so OneDrive
+   redirection and localised names work); user can add/remove.
 2. Model download with progress bar into `%LOCALAPPDATA%\ShotFinder\models`
    (CLIP image fp32 351.6 MB + multilingual text int8 135.5 MB + tokenizer
    2.9 MB ≈ 467 MB now; whisper `base` int8 adds ~75 MB in Phase 4). Indexing

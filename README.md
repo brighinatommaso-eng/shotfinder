@@ -56,7 +56,7 @@ python -m shotfinder.cli search "spiaggia al tramonto" --explain
 python -m shotfinder.cli search
 ```
 
-The first run watches the folders that exist among `Pictures\Screenshots`, `Pictures`, `Videos` and `Downloads`. To change them, edit `watched_folders` in `%LOCALAPPDATA%\ShotFinder\config.json` and run `index` again. `--data-dir` points the CLI at a different data directory.
+The first run watches the folders that exist among the Windows Pictures, Screenshots, Videos and Downloads known folders, so OneDrive redirection and localised folder names are handled. To change them, edit `watched_folders` in `%LOCALAPPDATA%\ShotFinder\config.json` and run `index` again. `--data-dir` points the CLI at a different data directory.
 
 ## Privacy
 
