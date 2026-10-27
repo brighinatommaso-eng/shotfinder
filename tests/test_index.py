@@ -48,6 +48,8 @@ def test_insert_and_search(index: Index, tmp_path: Path) -> None:
     assert hits[0]["file_id"] == file_id
     assert hits[0]["source"] == "ocr"
     assert "Milano" in hits[0]["snippet"]
+    assert hits[0]["hash"] == row["hash"]
+    assert hits[0]["mtime"] == row["mtime"]
 
     assert index.search_text("tra mil")
     assert index.search_text("treno") == []

@@ -229,6 +229,10 @@ class Config:
         return self.data_dir / "logs"
 
     @property
+    def thumbs_dir(self) -> Path:
+        return self.data_dir / "thumbs"
+
+    @property
     def models_dir(self) -> Path:
         """ONNX models live beside the index unless SHOTFINDER_MODELS_DIR overrides."""
         override = os.environ.get("SHOTFINDER_MODELS_DIR")

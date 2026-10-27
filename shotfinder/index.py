@@ -437,7 +437,7 @@ class Index:
             return []
         rows = self.conn.execute(
             """
-            SELECT f.id AS file_id, f.path, f.kind,
+            SELECT f.id AS file_id, f.path, f.kind, f.hash AS hash, f.mtime AS mtime,
                    text_fts.ts AS ts, text_fts.source AS source,
                    snippet(text_fts, 0, '[', ']', '…', 12) AS snippet,
                    bm25(text_fts) AS score
@@ -454,7 +454,7 @@ class Index:
     def recent_files(self, limit: int = 40) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT id AS file_id, path, kind,
+            SELECT id AS file_id, path, kind, hash, mtime,
                    NULL AS ts, NULL AS source, NULL AS snippet, 0.0 AS score
               FROM files
              WHERE status = 'done'
@@ -528,7 +528,8 @@ class Index:
         rows = self.conn.execute(
             """
             SELECT knn.rowid AS rowid, m.file_id AS file_id, m.ts AS ts,
-                   f.path AS path, f.kind AS kind, knn.distance AS distance
+                   f.path AS path, f.kind AS kind, f.hash AS hash, f.mtime AS mtime,
+                   knn.distance AS distance
               FROM (SELECT rowid, distance FROM vec_items
                      WHERE embedding MATCH ? AND k = ?) AS knn
               JOIN vec_meta m ON m.rowid = knn.rowid

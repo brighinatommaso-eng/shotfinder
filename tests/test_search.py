@@ -94,6 +94,16 @@ def test_snippet_comes_from_the_best_text_row() -> None:
     assert results[0]["snippet"] == "best"
 
 
+def test_merge_carries_hash_and_mtime_for_thumbnails() -> None:
+    text = [{**_text(1, "a.png"), "hash": "abc", "mtime": 123.0}]
+    vectors = [{**_vector(1, 0.1, "a.png"), "hash": "abc", "mtime": 123.0}]
+
+    results = merge(text, vectors)
+
+    assert results[0]["hash"] == "abc"
+    assert results[0]["mtime"] == 123.0
+
+
 def test_limit_and_empty_inputs() -> None:
     assert merge([], []) == []
     assert merge([_text(1)], [], limit=0) == []
@@ -160,6 +170,8 @@ def test_empty_query_returns_recent_files(tmp_path: Path) -> None:
 
     assert [row["file_id"] for row in results] == [file_id]
     assert results[0]["match_type"] == MATCH_RECENT
+    assert results[0]["hash"]
+    assert results[0]["mtime"] is not None
 
 
 def test_text_only_when_models_are_missing(tmp_path: Path) -> None:

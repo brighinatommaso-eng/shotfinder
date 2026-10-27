@@ -81,6 +81,8 @@ def merge(
                 "file_id": file_id,
                 "path": "",
                 "kind": "",
+                "hash": "",
+                "mtime": None,
                 "ts": None,
                 "snippet": "",
                 "score": 0.0,
@@ -97,6 +99,8 @@ def merge(
         entry = group(int(row["file_id"]))
         entry["path"] = row["path"]
         entry["kind"] = row["kind"]
+        entry["hash"] = row.get("hash") or entry["hash"]
+        entry["mtime"] = row.get("mtime", entry["mtime"])
         entry["score"] += 1.0 / (k + rank)
         entry["_text"] = True
         if entry["fts_rank"] is None or rank < entry["fts_rank"]:
@@ -110,6 +114,8 @@ def merge(
         entry = group(int(row["file_id"]))
         entry["path"] = row["path"]
         entry["kind"] = row["kind"]
+        entry["hash"] = row.get("hash") or entry["hash"]
+        entry["mtime"] = row.get("mtime", entry["mtime"])
         entry["score"] += 1.0 / (k + rank)
         entry["_visual"] = True
         cosine = distance_to_cosine(float(row["distance"]))
