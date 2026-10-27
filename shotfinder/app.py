@@ -11,12 +11,12 @@ from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import QApplication
 
 from . import models
-from .config import Config
+from .config import HOTKEY_CANDIDATES, Config
 from .index import Index
 from .ipc import SingleInstance
 from .logs import setup_logging
 from .ui import icons, theme
-from .ui.hotkey import GlobalHotkey
+from .ui.hotkey import GlobalHotkey, pretty_hotkey, register_first
 from .ui.search_window import SearchWindow
 from .ui.tray import IndexerReporter, TrayIcon
 from .watcher import Watcher
@@ -87,7 +87,7 @@ class ShotFinderApp:
         self.indexer = Indexer(config, self.index, on_progress=self.reporter.report)
         self.window = SearchWindow(config, self.index)
         self.tray = TrayIcon(self.indexer)
-        self.hotkey = GlobalHotkey(config.hotkey)
+        self.hotkey: GlobalHotkey | None = None
         self.watcher = Watcher(config, self.indexer)
         self._scan_signals = _ScanSignals(app)
         self._scan_signals.finished.connect(self._on_scan_finished)
@@ -104,7 +104,6 @@ class ShotFinderApp:
         self.tray.download_models.connect(self.start_download)
         self.tray.open_data_folder.connect(self.open_data_folder)
         self.tray.quit_requested.connect(self.app.quit)
-        self.hotkey.activated.connect(self.show_search)
         self.app.aboutToQuit.connect(self.shutdown)
 
     def run(self) -> int:
@@ -144,16 +143,56 @@ class ShotFinderApp:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.config.data_dir)))
 
     def _register_hotkey(self) -> None:
-        if self.hotkey.register():
-            log.info("Global hotkey %s registered", self.config.hotkey)
+        config = self.config
+        preferred = config.hotkey
+        candidates = [preferred] + [
+            combo for combo in HOTKEY_CANDIDATES if combo != preferred
+        ]
+        hotkey, failed = register_first(candidates)
+        self.hotkey = hotkey
+        if hotkey is None:
+            log.warning("No global hotkey could be registered: %s", ", ".join(failed))
+            self.tray.set_hotkey(None)
+            if self.tray.available:
+                self.tray.notify(
+                    "Hotkey unavailable",
+                    f"{pretty_hotkey(preferred)} and every fallback are already "
+                    "used by other apps. Open ShotFinder from the tray icon.",
+                    warning=True,
+                )
             return
-        log.warning("Global hotkey %s is unavailable", self.config.hotkey)
+
+        hotkey.activated.connect(self.show_search)
+        self.tray.set_hotkey(hotkey.spec)
+        log.info("Global hotkey %s registered", hotkey.spec)
+        if hotkey.spec == preferred:
+            return
+
+        if config.hotkey_is_custom:
+            # The user chose this combo; do not rewrite their config behind
+            # their back, and make sure they know the session is using another.
+            log.warning(
+                "Configured hotkey %s is taken; using %s for this session",
+                preferred,
+                hotkey.spec,
+            )
+            if self.tray.available:
+                self.tray.notify(
+                    "Hotkey taken",
+                    f"{pretty_hotkey(preferred)} is already used by another app. "
+                    f"Using {pretty_hotkey(hotkey.spec)} until you change the "
+                    "hotkey in config.json.",
+                    warning=True,
+                )
+            return
+
+        config.hotkey = hotkey.spec
+        config.save()
         if self.tray.available:
             self.tray.notify(
-                "Hotkey unavailable",
-                f"{self.config.hotkey} is already used by another app. "
-                "Open ShotFinder from the tray icon instead.",
-                warning=True,
+                "Search hotkey",
+                f"ShotFinder now opens with {pretty_hotkey(hotkey.spec)} "
+                f"({pretty_hotkey(preferred)} was already taken).",
             )
 
     # -- models --------------------------------------------------------------
@@ -215,7 +254,8 @@ class ShotFinderApp:
         if self._shutdown_done:
             return
         self._shutdown_done = True
-        self.hotkey.unregister()
+        if self.hotkey is not None:
+            self.hotkey.unregister()
         self.tray.hide()
         self.watcher.stop()
         self.indexer.stop()

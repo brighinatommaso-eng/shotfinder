@@ -12,6 +12,7 @@ import ctypes
 import logging
 import os
 from ctypes import wintypes
+from typing import Sequence
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject, Signal
 
@@ -170,3 +171,27 @@ class GlobalHotkey(QObject, QAbstractNativeEventFilter):
             self.activated.emit()
             return True, 0
         return False, 0
+
+
+def pretty_hotkey(spec: str) -> str:
+    """``ctrl+shift+space`` -> ``Ctrl+Shift+Space`` for menus and tooltips."""
+    return "+".join(part.strip().capitalize() for part in spec.split("+") if part.strip())
+
+
+def register_first(candidates: Sequence[str]) -> tuple[GlobalHotkey | None, list[str]]:
+    """Try each combo in order and keep the first the OS accepts.
+
+    Returns the registered hotkey (or ``None``) and the combos that failed,
+    including ones that cannot be parsed at all.
+    """
+    failed: list[str] = []
+    for spec in candidates:
+        try:
+            hotkey = GlobalHotkey(spec)
+        except ValueError:
+            failed.append(spec)
+            continue
+        if hotkey.register():
+            return hotkey, failed
+        failed.append(spec)
+    return None, failed

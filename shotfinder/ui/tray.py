@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from ..worker import Indexer
 from . import icons
+from .hotkey import pretty_hotkey
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class TrayIcon(QObject):
         self._paused = indexer.paused
         self._models_missing = False
         self._download_text: str | None = None
+        self._hotkey: str | None = None
         self._notification_action: str | None = None
 
         self._tray = QSystemTrayIcon(icons.app_icon(), self)
@@ -50,6 +52,8 @@ class TrayIcon(QObject):
         self._tray.messageClicked.connect(self._on_message_clicked)
 
         self._menu = QMenu()
+        self._hotkey_action = self._menu.addAction("Search: unavailable")
+        self._hotkey_action.setEnabled(False)
         self._open_action = self._menu.addAction("Open search")
         self._open_action.triggered.connect(self.open_search.emit)
         self._menu.addSeparator()
@@ -98,6 +102,11 @@ class TrayIcon(QObject):
         self._download_text = text
         self._refresh()
 
+    def set_hotkey(self, spec: str | None) -> None:
+        """Show which combo opens the window (``None`` when none registered)."""
+        self._hotkey = spec
+        self._refresh()
+
     def status_text(self) -> str:
         """The short state shown in the tooltip."""
         if self._download_text:
@@ -118,7 +127,13 @@ class TrayIcon(QObject):
         return "Idle"
 
     def _refresh(self) -> None:
-        self._tray.setToolTip(f"ShotFinder\n{self.status_text()}")
+        hotkey = (
+            f"Search: {pretty_hotkey(self._hotkey)}"
+            if self._hotkey
+            else "Search: unavailable"
+        )
+        self._hotkey_action.setText(hotkey)
+        self._tray.setToolTip(f"ShotFinder\n{self.status_text()}\n{hotkey}")
         self._pause_action.setText(
             "Resume indexing" if self._paused else "Pause indexing"
         )

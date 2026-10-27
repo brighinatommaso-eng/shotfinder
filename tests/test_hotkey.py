@@ -1,10 +1,18 @@
-"""Hotkey parsing (registration itself is Windows-only and side-effectful)."""
+"""Hotkey parsing and fallback ordering (registration is Windows-only)."""
 
 from __future__ import annotations
 
 import pytest
 
-from shotfinder.ui.hotkey import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, parse_hotkey
+from shotfinder.config import HOTKEY_CANDIDATES
+from shotfinder.ui.hotkey import (
+    MOD_ALT,
+    MOD_CONTROL,
+    MOD_SHIFT,
+    MOD_WIN,
+    parse_hotkey,
+    pretty_hotkey,
+)
 
 
 def test_default_combo() -> None:
@@ -30,3 +38,25 @@ def test_digit_key() -> None:
 def test_invalid_combos_raise(value: str) -> None:
     with pytest.raises(ValueError):
         parse_hotkey(value)
+
+
+def test_fallback_order_starts_with_the_documented_default() -> None:
+    assert HOTKEY_CANDIDATES[0] == "ctrl+alt+space"
+    assert HOTKEY_CANDIDATES == (
+        "ctrl+alt+space",
+        "ctrl+shift+space",
+        "ctrl+alt+f",
+        "ctrl+shift+f12",
+        "alt+shift+s",
+    )
+
+
+def test_every_fallback_candidate_parses() -> None:
+    for combo in HOTKEY_CANDIDATES:
+        modifiers, key = parse_hotkey(combo)
+        assert modifiers and key
+
+
+def test_pretty_hotkey_for_menus() -> None:
+    assert pretty_hotkey("ctrl+alt+space") == "Ctrl+Alt+Space"
+    assert pretty_hotkey("ctrl+shift+f12") == "Ctrl+Shift+F12"
