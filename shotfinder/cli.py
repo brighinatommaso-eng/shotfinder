@@ -72,7 +72,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
     stats = indexer.stats
     print(
         f"Done: {stats['processed']} indexed, {stats['skipped']} skipped, "
-        f"{stats['failed']} error(s)."
+        f"{stats['failed']} error(s); purged {stats['purged']} excluded file(s)."
     )
     return 0
 

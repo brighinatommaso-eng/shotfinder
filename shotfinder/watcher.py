@@ -13,6 +13,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileMovedEv
 from watchdog.observers import Observer
 
 from .config import Config
+from .exclusions import Exclusions
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,9 @@ def iter_media_files(config: Config) -> Iterator[Path]:
     def on_error(error: OSError) -> None:
         log.warning("Could not scan %s: %s", getattr(error, "filename", "?"), error)
 
-    for root in _unique_roots(config.watched_folders):
+    roots = _unique_roots(config.watched_folders)
+    exclusions = Exclusions(config, roots)
+    for root in roots:
         for dirpath, dirnames, filenames in os.walk(
             root, onerror=on_error, followlinks=False
         ):
@@ -67,6 +70,7 @@ def iter_media_files(config: Config) -> Iterator[Path]:
                 name
                 for name in dirnames
                 if not _is_under(current / name, config.data_dir)
+                and not exclusions.excludes_dir(current / name)
             ]
             for filename in filenames:
                 path = current / filename
@@ -79,6 +83,7 @@ class _Handler(FileSystemEventHandler):
         self._config = config
         self._sink = sink
         self._roots = roots
+        self._exclusions = Exclusions(config, roots)
         self._recent: dict[str, tuple[int, int, float]] = {}
         self._closed = False
 
@@ -92,7 +97,11 @@ class _Handler(FileSystemEventHandler):
 
     def _maybe_enqueue(self, raw_path: str | Path) -> None:
         path = Path(raw_path)
-        if not self._config.is_supported(path) or not self._watched(path):
+        if (
+            not self._config.is_supported(path)
+            or not self._watched(path)
+            or self._exclusions.excludes_file(path)
+        ):
             return
         try:
             stat = path.stat()

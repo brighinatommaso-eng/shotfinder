@@ -301,6 +301,10 @@ class Index:
         row = self.conn.execute("SELECT COUNT(*) FROM files").fetchone()
         return int(row[0])
 
+    def all_files(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM files ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
     def next_vision_backfill(self, limit: int = 100) -> list[dict[str, Any]]:
         """Images that finished OCR before the vision models were available."""
         rows = self.conn.execute(

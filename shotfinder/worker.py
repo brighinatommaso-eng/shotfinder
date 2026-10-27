@@ -15,6 +15,7 @@ from PIL import Image
 
 from . import models
 from .config import Config
+from .exclusions import MIN_IMAGE_DIMENSION, Exclusions, is_small_image
 from .extractors.ocr import OCRUnavailableError, ocr_image
 from .index import Index
 
@@ -39,7 +40,13 @@ class Indexer:
         self._cond = threading.Condition()
         self._thread: threading.Thread | None = None
         self._outstanding = 0
-        self._stats = {"enqueued": 0, "processed": 0, "skipped": 0, "failed": 0}
+        self._stats = {
+            "enqueued": 0,
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "purged": 0,
+        }
         self._ocr_error: str | None = None
         self._vision_missing_logged = False
 
@@ -49,6 +56,7 @@ class Indexer:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self.purge_excluded()
         self._load_vision_runtime()
         self._recover_pending()
         self._recover_vision()
@@ -156,6 +164,30 @@ class Indexer:
             self._push(int(row["id"]))
         if rows:
             log.info("Queued %d image(s) for vision backfill", len(rows))
+
+    def purge_excluded(self) -> int:
+        """Delete rows that are now outside the media scope.
+
+        Directory exclusions always apply. A tiny image is purged only when it
+        was already indexed as done; rows marked 'skipped' are left alone so the
+        next scan does not recreate and re-skip them forever.
+        """
+        exclusions = Exclusions(self.config, self.config.watched_folders)
+        removed = 0
+        for row in self.index.all_files():
+            path = Path(row["path"])
+            excluded = exclusions.excludes_file(path)
+            if not excluded and row["kind"] == "image" and row["status"] != "skipped":
+                excluded = is_small_image(path)
+            if not excluded:
+                continue
+            self.index.delete_file(int(row["id"]))
+            removed += 1
+        with self._cond:
+            self._stats["purged"] = removed
+        if removed:
+            log.info("Purged %d excluded file(s) from the index", removed)
+        return removed
 
     # -- worker thread -------------------------------------------------------
 
@@ -292,6 +324,22 @@ class Indexer:
         path = Path(row["path"])
         content_hash = row["hash"]
         stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
+
+        try:
+            with Image.open(path) as probe:
+                width, height = probe.size
+        except Exception:
+            width = height = 0
+        if 0 < min(width, height) < MIN_IMAGE_DIMENSION:
+            self.index.mark_status(
+                file_id,
+                "skipped",
+                f"image too small ({width}x{height})",
+                expected_hash=content_hash,
+            )
+            self._count("skipped")
+            log.debug("Skipped %s: %dx%d is below %d px", path, width, height, MIN_IMAGE_DIMENSION)
+            return
 
         if "ocr" not in stages:
             if self._ocr_error is not None:

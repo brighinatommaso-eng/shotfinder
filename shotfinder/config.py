@@ -15,6 +15,28 @@ APP_NAME = "ShotFinder"
 DEFAULT_HOTKEY = "ctrl+alt+space"
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".heic"})
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})
+DEFAULT_EXCLUDED_DIR_NAMES = frozenset(
+    {
+        "Library",
+        "PackageCache",
+        "node_modules",
+        ".git",
+        ".svn",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "obj",
+        "bin",
+        ".gradle",
+        ".idea",
+        ".vs",
+        "Temp",
+        "$RECYCLE.BIN",
+        "AppData",
+    }
+)
 
 
 def default_data_dir() -> Path:
@@ -61,6 +83,13 @@ def _normalise_extensions(values: Any, fallback: frozenset[str]) -> set[str]:
     return extensions or set(fallback)
 
 
+def _normalise_dir_names(values: Any) -> set[str]:
+    """An explicit empty list disables name-based exclusions entirely."""
+    if not isinstance(values, (list, tuple, set)):
+        return set(DEFAULT_EXCLUDED_DIR_NAMES)
+    return {value.strip() for value in values if isinstance(value, str) and value.strip()}
+
+
 @dataclass(slots=True)
 class Config:
     """Runtime configuration; serialised to <data_dir>/config.json."""
@@ -80,6 +109,9 @@ class Config:
     )
     vision_batch_size: int = 1
     min_visual_similarity: float = 0.25
+    exclude_dir_names: set[str] = field(
+        default_factory=lambda: set(DEFAULT_EXCLUDED_DIR_NAMES)
+    )
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir).expanduser()
@@ -138,6 +170,7 @@ class Config:
             "onnx_threads": self.onnx_threads,
             "vision_batch_size": self.vision_batch_size,
             "min_visual_similarity": self.min_visual_similarity,
+            "exclude_dir_names": sorted(self.exclude_dir_names),
         }
 
     def save(self) -> None:
@@ -175,6 +208,7 @@ class Config:
             ]
         config.image_extensions = _normalise_extensions(raw.get("image_extensions"), IMAGE_EXTENSIONS)
         config.video_extensions = _normalise_extensions(raw.get("video_extensions"), VIDEO_EXTENSIONS)
+        config.exclude_dir_names = _normalise_dir_names(raw.get("exclude_dir_names"))
 
         hotkey = raw.get("hotkey")
         if isinstance(hotkey, str) and hotkey.strip():
