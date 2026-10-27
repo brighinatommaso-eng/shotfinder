@@ -23,9 +23,11 @@ IMAGE_MODEL_FILENAME = "clip_image_fp32.onnx"
 TEXT_MODEL_FILENAME = "clip_text_int8.onnx"
 TOKENIZER_FILENAME = "tokenizer.json"
 
-# Placeholder: replace OWNER/REPOSITORY with the real GitHub repository before
-# publishing the models. SHOTFINDER_MODELS_DIR bypasses downloads entirely.
-MODEL_BASE_URL = "https://github.com/OWNER/REPOSITORY/releases/download/models-v1"
+# Release assets: https://github.com/brighinatommaso-eng/shotfinder/releases/tag/models-v1
+# SHOTFINDER_MODELS_DIR bypasses downloads entirely.
+MODEL_BASE_URL = (
+    "https://github.com/brighinatommaso-eng/shotfinder/releases/download/models-v1"
+)
 
 _CHUNK = 1024 * 1024
 
