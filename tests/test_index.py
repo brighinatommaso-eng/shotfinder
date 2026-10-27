@@ -56,6 +56,26 @@ def test_insert_and_search(index: Index, tmp_path: Path) -> None:
     assert index.count_pending() == 0
 
 
+def test_unchanged_rescan_does_not_hash(
+    index: Index, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _make_file(tmp_path / "unchanged.png", b"stable bytes")
+    file_id, _ = index.upsert_file(path, "image")
+
+    calls: list[Path] = []
+
+    def fail_if_called(candidate: str | Path) -> str:
+        calls.append(Path(candidate))
+        raise AssertionError("compute_file_hash should not run for an unchanged file")
+
+    monkeypatch.setattr("shotfinder.index.compute_file_hash", fail_if_called)
+
+    same_id, changed = index.upsert_file(path, "image")
+    assert same_id == file_id
+    assert changed is False
+    assert calls == []
+
+
 def test_move_by_hash_keeps_row_and_text(index: Index, tmp_path: Path) -> None:
     source = _make_file(tmp_path / "before.png", b"identical content")
     file_id, _ = index.upsert_file(source, "image")

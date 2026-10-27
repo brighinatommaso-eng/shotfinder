@@ -130,7 +130,6 @@ class Index:
         """
         path = _normalise_path(path)
         stat = path.stat()
-        digest = compute_file_hash(path)
         key = str(path)
 
         with self.conn as connection:
@@ -138,16 +137,27 @@ class Index:
                 "SELECT * FROM files WHERE path = ?", (key,)
             ).fetchone()
             if existing is not None:
-                if existing["hash"] == digest and existing["size"] == stat.st_size:
+                # Fast path: an unchanged file never needs its 1 MB re-read.
+                if (
+                    existing["size"] == stat.st_size
+                    and existing["mtime"] == stat.st_mtime
+                ):
                     if (
-                        existing["mtime"] != stat.st_mtime
-                        or existing["created"] != stat.st_ctime
+                        existing["created"] != stat.st_ctime
                         or existing["kind"] != kind
                     ):
                         connection.execute(
-                            "UPDATE files SET mtime = ?, created = ?, kind = ? WHERE id = ?",
-                            (stat.st_mtime, stat.st_ctime, kind, existing["id"]),
+                            "UPDATE files SET created = ?, kind = ? WHERE id = ?",
+                            (stat.st_ctime, kind, existing["id"]),
                         )
+                    return int(existing["id"]), False
+
+                digest = compute_file_hash(path)
+                if existing["hash"] == digest and existing["size"] == stat.st_size:
+                    connection.execute(
+                        "UPDATE files SET mtime = ?, created = ?, kind = ? WHERE id = ?",
+                        (stat.st_mtime, stat.st_ctime, kind, existing["id"]),
+                    )
                     return int(existing["id"]), False
 
                 # Same path, different content: invalidate every derived row.
@@ -170,6 +180,7 @@ class Index:
                 )
                 return int(existing["id"]), True
 
+            digest = compute_file_hash(path)
             same_hash = connection.execute(
                 "SELECT * FROM files WHERE hash = ? ORDER BY id", (digest,)
             ).fetchall()
