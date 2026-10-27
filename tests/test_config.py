@@ -33,3 +33,13 @@ def test_malformed_config_logs_a_warning_with_path(
     assert "Could not read" in caplog.text
     assert str(path) in caplog.text
     assert "Expecting property name" in caplog.text
+
+
+def test_min_visual_similarity_defaults_and_roundtrips(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    assert config.min_visual_similarity == 0.25
+
+    config.min_visual_similarity = 0.31
+    config.save()
+
+    assert Config.load(tmp_path).min_visual_similarity == 0.31

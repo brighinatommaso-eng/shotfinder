@@ -79,6 +79,7 @@ class Config:
         default_factory=lambda: max(1, min(4, (os.cpu_count() or 2) // 2))
     )
     vision_batch_size: int = 1
+    min_visual_similarity: float = 0.25
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir).expanduser()
@@ -136,6 +137,7 @@ class Config:
             "max_retries": self.max_retries,
             "onnx_threads": self.onnx_threads,
             "vision_batch_size": self.vision_batch_size,
+            "min_visual_similarity": self.min_visual_similarity,
         }
 
     def save(self) -> None:
@@ -190,4 +192,7 @@ class Config:
             value = raw.get(name)
             if isinstance(value, (int, float)) and value >= 0:
                 setattr(config, name, float(value))
+        similarity = raw.get("min_visual_similarity")
+        if isinstance(similarity, (int, float)) and 0.0 <= float(similarity) <= 1.0:
+            config.min_visual_similarity = float(similarity)
         return config

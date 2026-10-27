@@ -14,6 +14,7 @@ from shotfinder.search import (
     MATCH_TEXT,
     MATCH_VISUAL,
     distance_to_cosine,
+    filter_vector_rows,
     merge,
     search,
 )
@@ -106,6 +107,42 @@ def test_cosine_conversion() -> None:
     assert distance_to_cosine(0.0) == pytest.approx(1.0)
     assert distance_to_cosine(1.0) == pytest.approx(0.5)
     assert distance_to_cosine(2**0.5) == pytest.approx(0.0, abs=1e-9)
+
+
+def _distance_for(cosine: float) -> float:
+    return (2.0 * (1.0 - cosine)) ** 0.5
+
+
+def test_vector_hits_below_the_absolute_floor_are_dropped() -> None:
+    rows = [
+        _vector(1, _distance_for(0.31)),
+        _vector(2, _distance_for(0.24)),
+        _vector(3, _distance_for(0.20)),
+    ]
+
+    kept = filter_vector_rows(rows, 0.25)
+
+    assert [row["file_id"] for row in kept] == [1]
+
+
+def test_relative_margin_drops_the_weak_tail() -> None:
+    rows = [
+        _vector(1, _distance_for(0.31)),
+        _vector(2, _distance_for(0.27)),
+        _vector(3, _distance_for(0.25)),
+    ]
+
+    # Best 0.31, margin 0.05 -> cutoff 0.26, so 0.25 goes.
+    kept = filter_vector_rows(rows, 0.10)
+
+    assert [row["file_id"] for row in kept] == [1, 2]
+
+
+def test_no_visual_hits_when_everything_is_noise() -> None:
+    rows = [_vector(1, _distance_for(0.24)), _vector(2, _distance_for(0.20))]
+
+    assert filter_vector_rows(rows, 0.25) == []
+    assert filter_vector_rows([], 0.25) == []
 
 
 def test_empty_query_returns_recent_files(tmp_path: Path) -> None:

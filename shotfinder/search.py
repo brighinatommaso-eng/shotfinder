@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 RRF_K = 60
 VECTOR_K = 50
 DEFAULT_LIMIT = 40
+RELATIVE_SIMILARITY_MARGIN = 0.05
 
 MATCH_TEXT = "text"
 MATCH_VISUAL = "visual"
@@ -24,6 +25,25 @@ MATCH_RECENT = "recent"
 def distance_to_cosine(distance: float) -> float:
     """Convert sqlite-vec L2 distance to cosine (stored vectors are unit length)."""
     return 1.0 - (distance * distance) / 2.0
+
+
+def filter_vector_rows(
+    rows: Sequence[dict[str, Any]],
+    min_similarity: float,
+    *,
+    margin: float = RELATIVE_SIMILARITY_MARGIN,
+) -> list[dict[str, Any]]:
+    """Drop weak vector hits before they reach RRF.
+
+    The absolute floor removes noise that has no visual relation to the query.
+    The relative margin then removes a long tail that is only slightly weaker
+    than the best hit, so one strong match is not diluted by many mediocre ones.
+    """
+    if not rows:
+        return []
+    cosines = [distance_to_cosine(float(row["distance"])) for row in rows]
+    cutoff = max(float(min_similarity), max(cosines) - margin)
+    return [row for row, cosine in zip(rows, cosines) if cosine >= cutoff]
 
 
 def _first_per_file(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -150,5 +170,8 @@ def search(
         except Exception as exc:
             log.warning("Visual search unavailable: %s", exc)
         else:
-            vector_rows = index.search_vectors(vector, k=VECTOR_K)
+            vector_rows = filter_vector_rows(
+                index.search_vectors(vector, k=VECTOR_K),
+                config.min_visual_similarity,
+            )
     return merge(text_rows, vector_rows, limit=limit)
