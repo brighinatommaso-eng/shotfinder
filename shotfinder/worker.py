@@ -23,11 +23,26 @@ from .exclusions import (
     is_small_image,
 )
 from .extractors.ocr import OCRUnavailableError, ocr_image
+from .extractors.video import (
+    MAX_KEPT_FRAMES,
+    FrameCursor,
+    VideoUnavailableError,
+    iter_frames,
+)
 from .index import Index
 
 log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, int]], None]
+
+VIDEO_NOT_IMPLEMENTED_REASON = "video indexing is not implemented yet (Phase 4)"
+VIDEO_MODELS_REASON = "vision models missing; install them to index videos"
+VIDEO_EMPTY_REASON = "no video frames could be decoded"
+
+
+def _priority(kind: str) -> int:
+    """Images first, then videos, then anything unexpected."""
+    return 0 if kind == "image" else 1 if kind == "video" else 2
 
 
 class Indexer:
@@ -47,8 +62,10 @@ class Indexer:
         self.config = config
         self.index = index
         self._on_progress = on_progress
-        self._queue: queue.Queue[int] = queue.Queue()
-        self._retries: list[tuple[float, int, int]] = []
+        # (priority, sequence, file_id); the sequence keeps FIFO within a kind.
+        self._queue: queue.PriorityQueue[tuple[int, int, int]] = queue.PriorityQueue()
+        self._sequence = 0
+        self._retries: list[tuple[float, int, int, int]] = []
         self._attempts: dict[int, int] = {}
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -72,6 +89,7 @@ class Indexer:
             return
         self._stop.clear()
         self.purge_excluded()
+        self._reset_unimplemented_videos()
         self._load_vision_runtime()
         self._recover_pending()
         self._recover_vision()
@@ -148,7 +166,7 @@ class Indexer:
         if needs_indexing:
             with self._cond:
                 self._stats["enqueued"] += 1
-            self._push(file_id)
+            self._push(file_id, kind)
         return needs_indexing
 
     def remove(self, path: str | Path) -> None:
@@ -156,18 +174,36 @@ class Indexer:
         if row is not None:
             self.index.delete_file(int(row["id"]))
 
-    def _push(self, file_id: int) -> None:
+    def _next_sequence(self) -> int:
+        with self._cond:
+            self._sequence += 1
+            return self._sequence
+
+    def _push(self, file_id: int, kind: str) -> None:
         with self._cond:
             self._outstanding += 1
-        self._queue.put(file_id)
+        self._queue.put((_priority(kind), self._next_sequence(), file_id))
+        self._notify_progress()
+
+    def _requeue(self, file_id: int, kind: str) -> None:
+        """Put a partly processed video back without changing the outstanding count."""
+        self._queue.put((_priority(kind), self._next_sequence(), file_id))
         self._notify_progress()
 
     def _recover_pending(self) -> None:
         rows = self.index.next_pending(limit=-1)
         for row in rows:
-            self._push(int(row["id"]))
+            self._push(int(row["id"]), str(row["kind"]))
         if rows:
             log.info("Recovered %d pending file(s) from the index", len(rows))
+
+    def _reset_unimplemented_videos(self) -> None:
+        """Videos skipped by Phase 3 must be indexed now that frames exist."""
+        file_ids = self.index.reset_skipped_videos(VIDEO_NOT_IMPLEMENTED_REASON)
+        for file_id in file_ids:
+            self._push(file_id, "video")
+        if file_ids:
+            log.info("Queued %d video(s) previously skipped", len(file_ids))
 
     def _load_vision_runtime(self) -> None:
         """Import onnxruntime from the main thread before any OCR runs.
@@ -195,11 +231,14 @@ class Indexer:
             log.info("Queued %d image(s) for vision backfill", count)
 
     def backfill_vision(self) -> int:
-        """Queue every image that has OCR but no visual embedding."""
+        """Queue images without visual embeddings and videos skipped for models."""
         rows = self.index.next_vision_backfill(limit=-1)
         for row in rows:
-            self._push(int(row["id"]))
-        return len(rows)
+            self._push(int(row["id"]), "image")
+        videos = self.index.reset_skipped_videos(VIDEO_MODELS_REASON)
+        for file_id in videos:
+            self._push(file_id, "video")
+        return len(rows) + len(videos)
 
     def prepare_vision(self) -> None:
         """Import the ONNX runtime from the calling (main) thread."""
@@ -240,7 +279,7 @@ class Indexer:
                 continue
             self._dispatch_due_retries()
             try:
-                file_id = self._queue.get(timeout=0.5)
+                _, _, file_id = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if self._should_throttle():
@@ -252,17 +291,22 @@ class Indexer:
                         if self._outstanding == 0:
                             self._cond.notify_all()
                     break
+            requeue: str | None = None
             try:
-                self._process(file_id)
-                self._attempts.pop(file_id, None)
+                requeue = self._process(file_id)
+                if requeue is None:
+                    self._attempts.pop(file_id, None)
             except Exception as exc:
                 self._handle_failure(file_id, exc)
             finally:
-                with self._cond:
-                    self._outstanding = max(0, self._outstanding - 1)
-                    if self._outstanding == 0:
-                        self._cond.notify_all()
-                self._notify_progress()
+                if requeue is not None and not self._stop.is_set():
+                    self._requeue(file_id, requeue)
+                else:
+                    with self._cond:
+                        self._outstanding = max(0, self._outstanding - 1)
+                        if self._outstanding == 0:
+                            self._cond.notify_all()
+                    self._notify_progress()
 
     def _lower_priority(self) -> None:
         try:
@@ -293,15 +337,20 @@ class Indexer:
     def _dispatch_due_retries(self) -> None:
         now = time.monotonic()
         while self._retries and self._retries[0][0] <= now:
-            _, file_id, _ = heapq.heappop(self._retries)
-            self._queue.put(file_id)
+            _, _, file_id, priority = heapq.heappop(self._retries)
+            self._queue.put((priority, self._next_sequence(), file_id))
 
     def _handle_failure(self, file_id: int, exc: Exception) -> None:
         attempt = self._attempts.get(file_id, 0) + 1
         self._attempts[file_id] = attempt
         if attempt <= self.config.max_retries:
             due = time.monotonic() + self.config.retry_delay_seconds
-            heapq.heappush(self._retries, (due, file_id, attempt))
+            row = self.index.get_file(file_id)
+            priority = _priority(str(row["kind"])) if row is not None else 2
+            heapq.heappush(
+                self._retries,
+                (due, self._next_sequence(), file_id, priority),
+            )
             with self._cond:
                 self._outstanding += 1
             log.warning(
@@ -323,42 +372,177 @@ class Indexer:
             self._stats["failed"] += 1
         log.exception("Giving up on file %s", file_id)
 
-    def _process(self, file_id: int) -> None:
+    def _process(self, file_id: int) -> str | None:
+        """Run one turn for *file_id*; return a kind when it must be requeued."""
         row = self.index.get_file(file_id)
         if row is None:
-            return
+            return None
         stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
-        # Backfill rows are already 'done'; only skip them when vision is present.
-        if row["status"] == "done" and "vision" in stages:
-            return
-        if row["status"] not in ("pending", "done"):
-            return
+        kind = str(row["kind"])
+        if row["status"] == "done":
+            # Only an image waiting for its vision embedding is still work.
+            if not (kind == "image" and "vision" not in stages):
+                return None
+        elif row["status"] != "pending":
+            return None
         path = Path(row["path"])
         if not path.is_file():
             # The watcher may have moved the file while this item was queued.
             current = self.index.get_file(file_id)
             if current is None:
-                return
+                return None
             if current["path"] != row["path"]:
                 if current["status"] == "pending":
-                    self._push(file_id)
-                return
+                    self._push(file_id, str(current["kind"]))
+                return None
             if not Path(current["path"]).is_file():
                 self.index.delete_file(file_id)
-            return
+            return None
 
-        kind = row["kind"]
         if kind == "video":
-            self.index.mark_status(
-                file_id, "skipped", "video indexing is not implemented yet (Phase 4)"
-            )
-            self._count("skipped")
-            return
+            return self._process_video(row)
         if kind != "image":
             self.index.mark_status(file_id, "skipped", f"unsupported kind: {kind}")
             self._count("skipped")
-            return
+            return None
         self._process_image(row)
+        return None
+
+    def _process_video(self, row: dict[str, Any]) -> str | None:
+        """Sample one budget of frames, embed them and persist the cursor."""
+        file_id = int(row["id"])
+        path = Path(row["path"])
+        content_hash = row["hash"]
+
+        if not models.models_ready(self.config.models_dir):
+            if self.index.mark_status(
+                file_id,
+                "skipped",
+                VIDEO_MODELS_REASON,
+                expected_hash=content_hash,
+            ):
+                self._count("skipped")
+            if not self._vision_missing_logged:
+                log.info(
+                    "Vision models not installed in %s; videos wait for them",
+                    self.config.models_dir,
+                )
+                self._vision_missing_logged = True
+            return None
+
+        if not self.config.index_cloud_only_files and is_cloud_only(path):
+            # Dehydrated since it was queued; decoding would pull it from the
+            # cloud. Leave it for a later scan once the user hydrates it.
+            self.index.mark_status(
+                file_id, "skipped", CLOUD_ONLY_REASON, expected_hash=content_hash
+            )
+            self._count("skipped")
+            return None
+
+        progress = self.index.video_progress(file_id)
+        if progress is None:
+            cursor = FrameCursor()
+        else:
+            cursor = FrameCursor(
+                next_ts=float(progress["next_ts"]),
+                kept=int(progress["kept"]),
+                last_hash=progress["last_hash"],
+            )
+        budget = max(1, int(self.config.video_frames_per_turn))
+        failure: str | None = None
+        try:
+            frames = list(iter_frames(path, cursor, max_frames=budget))
+        except VideoUnavailableError as exc:
+            frames = []
+            failure = str(exc)
+        except Exception as exc:  # noqa: BLE001 - reported per file
+            frames = []
+            failure = f"video decoding failed: {exc}"
+            log.warning("Video decoding failed for %s", path, exc_info=True)
+
+        if frames:
+            from .extractors.vision import embed_images
+
+            vectors = embed_images(
+                [frame.image for frame in frames],
+                models_dir=self.config.models_dir,
+                threads=self.config.onnx_threads,
+                batch_size=self.config.vision_batch_size,
+            )
+            if len(vectors) != len(frames):
+                raise RuntimeError(
+                    f"expected {len(frames)} vectors, got {len(vectors)}"
+                )
+            items = [
+                (frame.timestamp, vector)
+                for frame, vector in zip(frames, vectors)
+            ]
+        else:
+            items = []
+
+        if not self.index.add_video_frames(
+            file_id,
+            items,
+            next_ts=cursor.next_ts,
+            kept=cursor.kept,
+            last_hash=cursor.last_hash,
+            expected_hash=content_hash,
+        ):
+            # The file changed while ffmpeg was running; its queued refresh wins.
+            return None
+
+        if frames:
+            log.debug(
+                "Video %s: kept %d frame(s), %d total, through %.0fs",
+                path.name,
+                len(frames),
+                cursor.kept,
+                cursor.next_ts,
+            )
+
+        if failure:
+            if cursor.kept:
+                log.warning("Video %s decoded partially: %s", path.name, failure)
+                self._finish_video(row, cursor)
+            else:
+                self.index.clear_video_progress(file_id)
+                self.index.mark_status(
+                    file_id, "skipped", failure, expected_hash=content_hash
+                )
+                self._count("skipped")
+            return None
+
+        if cursor.kept >= MAX_KEPT_FRAMES or cursor.exhausted:
+            if cursor.kept == 0:
+                self.index.clear_video_progress(file_id)
+                self.index.mark_status(
+                    file_id,
+                    "skipped",
+                    VIDEO_EMPTY_REASON,
+                    expected_hash=content_hash,
+                )
+                self._count("skipped")
+            else:
+                self._finish_video(row, cursor)
+            return None
+        return "video"
+
+    def _finish_video(self, row: dict[str, Any], cursor: FrameCursor) -> None:
+        file_id = int(row["id"])
+        stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
+        stages.add("frames")
+        if self.index.mark_status(
+            file_id,
+            "done",
+            None,
+            stages_done=",".join(sorted(stages)),
+            expected_hash=row["hash"],
+        ):
+            self.index.clear_video_progress(file_id)
+            self._count("processed")
+        log.debug(
+            "Video %s done: %d kept frame(s)", Path(row["path"]).name, cursor.kept
+        )
 
     def _process_image(self, row: dict[str, Any]) -> None:
         file_id = int(row["id"])

@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS vec_meta (
 CREATE INDEX IF NOT EXISTS idx_vec_meta_file_id ON vec_meta(file_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512]);
+
+-- resume state for videos whose frames are still being sampled
+CREATE TABLE IF NOT EXISTS video_progress (
+  file_id INTEGER PRIMARY KEY,
+  next_ts REAL NOT NULL,
+  kept INTEGER NOT NULL,
+  last_hash TEXT
+);
 """
 
 _HASH_CHUNK = 1024 * 1024
@@ -73,6 +81,20 @@ def _fts_query(query: str) -> str:
 
 def _as_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _prepare_vectors(
+    items: Iterable[tuple[float | None, Sequence[float]]],
+) -> list[tuple[float | None, list[float]]]:
+    prepared: list[tuple[float | None, list[float]]] = []
+    for timestamp, vector in items:
+        values = [float(value) for value in vector]
+        if len(values) != _VECTOR_DIMENSIONS:
+            raise ValueError(
+                f"expected {_VECTOR_DIMENSIONS}-dimensional vector, got {len(values)}"
+            )
+        prepared.append((timestamp, values))
+    return prepared
 
 
 class Index:
@@ -330,6 +352,7 @@ class Index:
 
     def _delete_content(self, connection: sqlite3.Connection, file_id: int) -> None:
         connection.execute("DELETE FROM text_fts WHERE file_id = ?", (file_id,))
+        connection.execute("DELETE FROM video_progress WHERE file_id = ?", (file_id,))
         self._delete_vectors(connection, file_id)
 
     def _delete_vectors(
@@ -383,6 +406,37 @@ class Index:
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def reset_skipped_videos(self, reason_prefix: str) -> list[int]:
+        """Queue videos that were skipped for *reason_prefix*; return their ids.
+
+        Old installs marked every video as "not implemented yet", and a video
+        skipped because the CLIP models were missing must be retried once they
+        are installed. Any partial frame state is dropped so the run restarts
+        from a clean slate.
+        """
+        with self.conn as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM files
+                 WHERE kind = 'video' AND status = 'skipped'
+                   AND error LIKE ? || '%'
+                 ORDER BY id
+                """,
+                (reason_prefix,),
+            ).fetchall()
+            for row in rows:
+                file_id = int(row["id"])
+                self._delete_content(connection, file_id)
+                connection.execute(
+                    """
+                    UPDATE files
+                       SET status = 'pending', error = NULL, stages_done = ''
+                     WHERE id = ?
+                    """,
+                    (file_id,),
+                )
+        return [int(row["id"]) for row in rows]
 
     # -- text ----------------------------------------------------------------
 
@@ -480,14 +534,7 @@ class Index:
         retried stage idempotent, and ``expected_hash`` rejects results computed
         from a file that changed in the meantime.
         """
-        prepared: list[tuple[float | None, list[float]]] = []
-        for timestamp, vector in items:
-            values = [float(value) for value in vector]
-            if len(values) != _VECTOR_DIMENSIONS:
-                raise ValueError(
-                    f"expected {_VECTOR_DIMENSIONS}-dimensional vector, got {len(values)}"
-                )
-            prepared.append((timestamp, values))
+        prepared = _prepare_vectors(items)
         if not prepared:
             return 0
         with self.conn as connection:
@@ -500,15 +547,77 @@ class Index:
                     return 0
             self._delete_vectors(connection, file_id)
             for timestamp, values in prepared:
-                cursor = connection.execute(
-                    "INSERT INTO vec_meta (file_id, ts) VALUES (?, ?)",
-                    (file_id, timestamp),
-                )
-                connection.execute(
-                    "INSERT INTO vec_items (rowid, embedding) VALUES (?, ?)",
-                    (cursor.lastrowid, sqlite_vec.serialize_float32(values)),
-                )
+                self._insert_vector(connection, file_id, timestamp, values)
         return len(prepared)
+
+    def add_video_frames(
+        self,
+        file_id: int,
+        items: Iterable[tuple[float, Sequence[float]]],
+        *,
+        next_ts: float,
+        kept: int,
+        last_hash: str | None,
+        expected_hash: str | None = None,
+    ) -> bool:
+        """Append one turn of video vectors and its resume cursor atomically.
+
+        Vectors and :class:`video_progress` are written in one transaction, so
+        an interrupted turn either keeps both or neither: a resumed video never
+        embeds the same frame twice. Returns ``False`` when the file changed
+        while ffmpeg was running.
+        """
+        prepared = _prepare_vectors(items)
+        with self.conn as connection:
+            if expected_hash is not None:
+                unchanged = connection.execute(
+                    "SELECT 1 FROM files WHERE id = ? AND hash = ?",
+                    (file_id, expected_hash),
+                ).fetchone()
+                if unchanged is None:
+                    return False
+            for timestamp, values in prepared:
+                self._insert_vector(connection, file_id, timestamp, values)
+            connection.execute(
+                """
+                INSERT INTO video_progress (file_id, next_ts, kept, last_hash)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    next_ts = excluded.next_ts,
+                    kept = excluded.kept,
+                    last_hash = excluded.last_hash
+                """,
+                (file_id, float(next_ts), int(kept), last_hash),
+            )
+        return True
+
+    def _insert_vector(
+        self,
+        connection: sqlite3.Connection,
+        file_id: int,
+        timestamp: float | None,
+        values: Sequence[float],
+    ) -> None:
+        cursor = connection.execute(
+            "INSERT INTO vec_meta (file_id, ts) VALUES (?, ?)",
+            (file_id, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO vec_items (rowid, embedding) VALUES (?, ?)",
+            (cursor.lastrowid, sqlite_vec.serialize_float32(list(values))),
+        )
+
+    def video_progress(self, file_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM video_progress WHERE file_id = ?", (file_id,)
+        ).fetchone()
+        return _as_dict(row)
+
+    def clear_video_progress(self, file_id: int) -> None:
+        with self.conn as connection:
+            connection.execute(
+                "DELETE FROM video_progress WHERE file_id = ?", (file_id,)
+            )
 
     def search_vectors(
         self, vector: Sequence[float], k: int = 50

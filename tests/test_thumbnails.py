@@ -73,3 +73,35 @@ def test_broken_source_returns_none_and_leaves_no_file(tmp_path: Path) -> None:
 
 def test_missing_source_returns_none(tmp_path: Path) -> None:
     assert ensure_thumbnail(tmp_path / "missing.png", "gone", tmp_path / "thumbs") is None
+
+
+def test_video_thumbnail_uses_the_matched_frame(
+    scene_video: Path, tmp_path: Path
+) -> None:
+    cache = tmp_path / "thumbs"
+
+    target = ensure_thumbnail(scene_video, "clip-30", cache, ts=30)
+
+    assert target == cache / "clip-30.jpg"
+    assert target is not None and target.is_file()
+    with Image.open(target) as thumbnail:
+        red, _green, blue = thumbnail.convert("RGB").getpixel(
+            (thumbnail.width // 2, thumbnail.height // 2)
+        )
+    assert blue > 150
+    assert blue > red + 80
+
+
+def test_video_without_a_timestamp_uses_the_first_frame(
+    scene_video: Path, tmp_path: Path
+) -> None:
+    cache = tmp_path / "thumbs"
+
+    target = ensure_thumbnail(scene_video, "clip-first", cache)
+
+    assert target is not None and target.is_file()
+    with Image.open(target) as thumbnail:
+        red, _green, blue = thumbnail.convert("RGB").getpixel(
+            (thumbnail.width // 2, thumbnail.height // 2)
+        )
+    assert not (blue > 150 and blue > red + 80)
