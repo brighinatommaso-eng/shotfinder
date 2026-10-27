@@ -45,9 +45,16 @@ from PySide6.QtWidgets import (
 from .. import models
 from ..config import Config
 from ..index import Index
-from ..search import MATCH_BOTH, MATCH_RECENT, MATCH_TEXT, MATCH_VISUAL, search
+from ..search import (
+    MATCH_BOTH,
+    MATCH_RECENT,
+    MATCH_TEXT,
+    MATCH_VISUAL,
+    SearchResults,
+    search,
+)
 from . import icons
-from .formatting import clean_snippet, folder_label, format_date
+from .formatting import clean_snippet, folder_label, format_date, format_timestamp
 from .preview import PreviewWindow
 from .search_session import SearchSession
 from .theme import Palette, is_dark, palette_for
@@ -93,7 +100,7 @@ class SearchTask(QRunnable):
             rows = search(self._config, self._index, self._query, limit=RESULT_LIMIT)
         except Exception as exc:  # noqa: BLE001 - surfaced in the status line
             log.exception("Search failed for %r", self._query)
-            self.signals.finished.emit(self._generation, [], str(exc))
+            self.signals.finished.emit(self._generation, SearchResults(), str(exc))
         else:
             self.signals.finished.emit(self._generation, rows, "")
 
@@ -112,16 +119,21 @@ class ThumbnailTask(QRunnable):
         cache_dir: Path,
         key: str,
         signals: _ThumbnailSignals,
+        *,
+        ts: float | None = None,
     ) -> None:
         super().__init__()
         self._source = source
         self._hash = file_hash
         self._cache_dir = cache_dir
         self._key = key
+        self._ts = ts
         self.signals = signals
 
     def run(self) -> None:
-        path = ensure_thumbnail(self._source, self._hash, self._cache_dir)
+        path = ensure_thumbnail(
+            self._source, self._hash, self._cache_dir, ts=self._ts
+        )
         self.signals.done.emit(self._key, "" if path is None else str(path))
 
 
@@ -203,6 +215,20 @@ class ResultTile(QFrame):
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._thumb)
 
+        self._timestamp: QLabel | None = None
+        if result.get("kind") == "video" and result.get("ts") is not None:
+            stamp = format_timestamp(float(result["ts"]))
+            self._timestamp = QLabel(stamp, self._thumb)
+            self._timestamp.setObjectName("Timestamp")
+            self._timestamp.ensurePolished()
+            self._timestamp.adjustSize()
+            self._timestamp.move(
+                THUMBNAIL_SIZE[0] - self._timestamp.width() - 6,
+                THUMBNAIL_SIZE[1] - self._timestamp.height() - 6,
+            )
+            self._timestamp.raise_()
+            self.setToolTip(f"{result.get('path', '')}\nFrame at {stamp}")
+
         name = ElidedLabel(Path(str(result.get("path", ""))).name, self)
         name.setObjectName("TileName")
         name.setFixedHeight(17)
@@ -257,7 +283,19 @@ class ResultTile(QFrame):
 
     @property
     def thumbnail_key(self) -> str:
-        return str(self.result.get("hash") or "")
+        key = str(self.result.get("hash") or "")
+        timestamp = self.thumbnail_timestamp
+        if key and timestamp is not None:
+            return f"{key}-{int(timestamp)}"
+        return key
+
+    @property
+    def thumbnail_timestamp(self) -> float | None:
+        """The frame to show for a video; ``0`` when no frame matched."""
+        if self.result.get("kind") != "video":
+            return None
+        ts = self.result.get("ts")
+        return float(ts) if ts is not None else 0.0
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         self._pixmap = pixmap
@@ -310,6 +348,7 @@ class SearchWindow(QWidget):
         self._thumbnails: dict[str, QPixmap] = {}
         self._thumbnails_inflight: set[str] = set()
         self._tiles: list[ResultTile] = []
+        self._section: QLabel | None = None
         self._selected = -1
         self._was_active = False
         self._preview: PreviewWindow | None = None
@@ -621,7 +660,7 @@ class SearchWindow(QWidget):
         self._pool.start(task)
 
     def _on_search_finished(
-        self, generation: int, results: list[dict[str, Any]], error: str
+        self, generation: int, results: SearchResults, error: str
     ) -> None:
         self._tasks.pop(generation, None)
         if not self._session.is_current(generation):
@@ -632,25 +671,43 @@ class SearchWindow(QWidget):
             return
         self._render(results)
 
-    def _render(self, results: list[dict[str, Any]]) -> None:
+    def _render(self, results: SearchResults) -> None:
         self._last_query = self._session.query.strip()
-        self._last_count = len(results)
+        self._last_count = len(results.all())
         self._clear_tiles()
         self._selected = -1
 
         if not results:
             self._show_empty_state()
-        else:
-            self._stack.setCurrentWidget(self._scroll)
-            for index, result in enumerate(results):
-                tile = ResultTile(result, self._palette)
-                tile.clicked.connect(self._on_tile_clicked)
-                tile.activated.connect(self._on_tile_activated)
-                self._grid.addWidget(tile, index // COLUMNS, index % COLUMNS)
-                self._tiles.append(tile)
-            self._select(0, scroll=False)
-            self._request_thumbnails()
+            self._update_status()
+            return
+
+        self._stack.setCurrentWidget(self._scroll)
+        for index, result in enumerate(results.matches):
+            self._add_tile(result, index // COLUMNS, index % COLUMNS)
+
+        if results.related:
+            header_row = (len(results.matches) + COLUMNS - 1) // COLUMNS
+            self._section = QLabel("Related by appearance · approximate", self)
+            self._section.setObjectName("SectionHeader")
+            self._grid.addWidget(self._section, header_row, 0, 1, COLUMNS)
+            for index, result in enumerate(results.related):
+                self._add_tile(
+                    result,
+                    header_row + 1 + index // COLUMNS,
+                    index % COLUMNS,
+                )
+
+        self._select(0, scroll=False)
+        self._request_thumbnails()
         self._update_status()
+
+    def _add_tile(self, result: dict[str, Any], row: int, column: int) -> None:
+        tile = ResultTile(result, self._palette)
+        tile.clicked.connect(self._on_tile_clicked)
+        tile.activated.connect(self._on_tile_activated)
+        self._grid.addWidget(tile, row, column)
+        self._tiles.append(tile)
 
     def _show_empty_state(self) -> None:
         self._stack.setCurrentIndex(1)
@@ -668,6 +725,11 @@ class SearchWindow(QWidget):
             )
 
     def _clear_tiles(self) -> None:
+        if self._section is not None:
+            self._grid.removeWidget(self._section)
+            self._section.setParent(None)
+            self._section.deleteLater()
+            self._section = None
         for tile in self._tiles:
             self._grid.removeWidget(tile)
             tile.setParent(None)
@@ -693,6 +755,7 @@ class SearchWindow(QWidget):
                 cache_dir,
                 key,
                 self._thumbnail_signals,
+                ts=tile.thumbnail_timestamp,
             )
             self._pool.start(task)
 
@@ -714,6 +777,11 @@ class SearchWindow(QWidget):
         if self._last_query:
             noun = "result" if self._last_count == 1 else "results"
             text = f"{self._last_count} {noun}"
+            related = sum(
+                1 for tile in self._tiles if tile.result.get("match_type") == MATCH_VISUAL
+            )
+            if related:
+                text += f" · {related} approximate"
         else:
             noun = "recent file" if self._last_count == 1 else "recent files"
             text = f"{self._last_count} {noun}"

@@ -1,8 +1,17 @@
-"""Hybrid text + vector search with reciprocal rank fusion (Phase 2)."""
+"""Hybrid text + visual search with reciprocal rank fusion (Phase 2).
+
+Text and visual evidence are not equally trustworthy. OCR hits are literal,
+while CLIP cosine similarity on the shipped model overlaps between noise and
+real hits (see ``docs/threshold-calibration.md``). The two are therefore never
+merged into one ranked list: :class:`SearchResults.matches` holds text and
+both-hits ordered by RRF, and :class:`SearchResults.related` holds visual-only
+hits ordered by cosine, capped and presented as suggestions.
+"""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from . import models
@@ -14,12 +23,28 @@ log = logging.getLogger(__name__)
 RRF_K = 60
 VECTOR_K = 50
 DEFAULT_LIMIT = 40
+DEFAULT_MAX_RELATED = 8
 RELATIVE_SIMILARITY_MARGIN = 0.05
 
 MATCH_TEXT = "text"
 MATCH_VISUAL = "visual"
 MATCH_BOTH = "both"
 MATCH_RECENT = "recent"
+
+
+@dataclass(slots=True)
+class SearchResults:
+    """Two ranked groups: confident matches, then approximate suggestions."""
+
+    matches: list[dict[str, Any]] = field(default_factory=list)
+    related: list[dict[str, Any]] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.matches or self.related)
+
+    def all(self) -> list[dict[str, Any]]:
+        """Matches first, then related, in display order."""
+        return self.matches + self.related
 
 
 def distance_to_cosine(distance: float) -> float:
@@ -33,11 +58,12 @@ def filter_vector_rows(
     *,
     margin: float = RELATIVE_SIMILARITY_MARGIN,
 ) -> list[dict[str, Any]]:
-    """Drop weak vector hits before they reach RRF.
+    """Drop weak vector hits before they are ranked.
 
-    The absolute floor removes noise that has no visual relation to the query.
-    The relative margin then removes a long tail that is only slightly weaker
-    than the best hit, so one strong match is not diluted by many mediocre ones.
+    The absolute floor is a garbage floor, not a relevance classifier: it only
+    removes vectors that are essentially unrelated to the query. The relative
+    margin then removes a long tail that is only slightly weaker than the best
+    hit, so one strong match is not diluted by many mediocre ones.
     """
     if not rows:
         return []
@@ -59,18 +85,35 @@ def _first_per_file(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
-def merge(
+def _finalise(entry: dict[str, Any]) -> dict[str, Any]:
+    result = dict(entry)
+    text = bool(result.pop("_text"))
+    visual = bool(result.pop("_visual"))
+    result.pop("_best_rank", None)
+    if text and visual:
+        result["match_type"] = MATCH_BOTH
+    elif text:
+        result["match_type"] = MATCH_TEXT
+    else:
+        result["match_type"] = MATCH_VISUAL
+    return result
+
+
+def combine(
     text_rows: Sequence[dict[str, Any]],
     vector_rows: Sequence[dict[str, Any]],
     *,
     k: int = RRF_K,
     limit: int = DEFAULT_LIMIT,
-) -> list[dict[str, Any]]:
-    """Reciprocal rank fusion, grouped by ``file_id``.
+    max_related: int = DEFAULT_MAX_RELATED,
+) -> SearchResults:
+    """Split fused results into confident matches and visual suggestions.
 
-    Each list contributes ``1 / (k + rank)`` per unique file. Rows are
-    deduplicated first, so ten matching OCR lines do not outvote ten files. The
-    timestamp of the highest-ranked hit is kept as the video jump point.
+    Each list contributes ``1 / (k + rank)`` per unique file to the RRF score
+    used to order ``matches``. Rows are deduplicated first, so ten matching OCR
+    lines do not outvote ten files. ``related`` is ordered by cosine instead,
+    because RRF ranks would present an approximate hit as if it were certain.
+    The timestamp of the best hit is kept as the video jump point.
     """
     groups: dict[int, dict[str, Any]] = {}
 
@@ -125,25 +168,21 @@ def merge(
             entry["_best_rank"] = rank
             entry["ts"] = row.get("ts")
 
-    ordered = sorted(
-        groups.values(),
-        key=lambda item: (-item["score"], item["path"].lower(), item["file_id"]),
+    matches: list[dict[str, Any]] = []
+    related: list[dict[str, Any]] = []
+    for entry in groups.values():
+        (matches if entry["_text"] else related).append(_finalise(entry))
+
+    matches.sort(
+        key=lambda item: (-item["score"], item["path"].lower(), item["file_id"])
     )
-    results: list[dict[str, Any]] = []
-    for entry in ordered[: max(0, limit)]:
-        entry = dict(entry)
-        entry["match_type"] = (
-            MATCH_BOTH
-            if entry["_text"] and entry["_visual"]
-            else MATCH_TEXT
-            if entry["_text"]
-            else MATCH_VISUAL
-        )
-        entry.pop("_text", None)
-        entry.pop("_visual", None)
-        entry.pop("_best_rank", None)
-        results.append(entry)
-    return results
+    related.sort(
+        key=lambda item: (-item["cosine"], item["path"].lower(), item["file_id"])
+    )
+    return SearchResults(
+        matches=matches[: max(0, limit)],
+        related=related[: max(0, max_related)],
+    )
 
 
 def search(
@@ -151,7 +190,7 @@ def search(
     index: Index,
     query: str,
     limit: int = DEFAULT_LIMIT,
-) -> list[dict[str, Any]]:
+) -> SearchResults:
     """Hybrid search; an empty query returns the most recent indexed files."""
     query = query.strip()
     if not query:
@@ -160,7 +199,7 @@ def search(
             row["match_type"] = MATCH_RECENT
             row["fts_rank"] = None
             row["cosine"] = None
-        return rows
+        return SearchResults(matches=rows)
 
     text_rows = index.search_text(query, limit=max(limit, DEFAULT_LIMIT))
     vector_rows: list[dict[str, Any]] = []
@@ -180,4 +219,9 @@ def search(
                 index.search_vectors(vector, k=VECTOR_K),
                 config.min_visual_similarity,
             )
-    return merge(text_rows, vector_rows, limit=limit)
+    return combine(
+        text_rows,
+        vector_rows,
+        limit=limit,
+        max_related=config.max_visual_results,
+    )

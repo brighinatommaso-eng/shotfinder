@@ -16,6 +16,18 @@ def format_date(timestamp: float | None) -> str:
     return moment.strftime("%d %b %Y · %H:%M")
 
 
+def format_timestamp(seconds: float | None) -> str:
+    """``134`` -> ``02:14`` (hours appear only when needed)."""
+    if seconds is None:
+        return ""
+    total = max(0, int(float(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def clean_snippet(snippet: str | None, limit: int = 160) -> str:
     """Turn an FTS snippet into display text.
 

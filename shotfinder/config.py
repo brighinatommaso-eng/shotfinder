@@ -13,6 +13,14 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "ShotFinder"
 DEFAULT_HOTKEY = "ctrl+alt+space"
+# Tried in order when the configured combo is already owned by another app.
+HOTKEY_CANDIDATES = (
+    DEFAULT_HOTKEY,
+    "ctrl+shift+space",
+    "ctrl+alt+f",
+    "ctrl+shift+f12",
+    "alt+shift+s",
+)
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".heic"})
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})
 
@@ -189,6 +197,9 @@ class Config:
     image_extensions: set[str] = field(default_factory=lambda: set(IMAGE_EXTENSIONS))
     video_extensions: set[str] = field(default_factory=lambda: set(VIDEO_EXTENSIONS))
     hotkey: str = DEFAULT_HOTKEY
+    # True only when the value came from the user, so a failed user choice is
+    # reported instead of being silently replaced by a fallback.
+    hotkey_is_custom: bool = False
     ocr_max_dimension: int = 1600
     cpu_pause_threshold: float = 70.0
     cpu_pause_seconds: float = 10.0
@@ -198,7 +209,9 @@ class Config:
         default_factory=lambda: max(1, min(4, (os.cpu_count() or 2) // 2))
     )
     vision_batch_size: int = 1
-    min_visual_similarity: float = 0.25
+    min_visual_similarity: float = 0.20
+    max_visual_results: int = 8
+    video_frames_per_turn: int = 30
     index_cloud_only_files: bool = False
     exclude_dir_names: set[str] = field(
         default_factory=lambda: set(DEFAULT_EXCLUDED_DIR_NAMES)
@@ -261,6 +274,7 @@ class Config:
             "image_extensions": sorted(self.image_extensions),
             "video_extensions": sorted(self.video_extensions),
             "hotkey": self.hotkey,
+            "hotkey_custom": self.hotkey_is_custom,
             "ocr_max_dimension": self.ocr_max_dimension,
             "cpu_pause_threshold": self.cpu_pause_threshold,
             "cpu_pause_seconds": self.cpu_pause_seconds,
@@ -269,6 +283,8 @@ class Config:
             "onnx_threads": self.onnx_threads,
             "vision_batch_size": self.vision_batch_size,
             "min_visual_similarity": self.min_visual_similarity,
+            "max_visual_results": self.max_visual_results,
+            "video_frames_per_turn": self.video_frames_per_turn,
             "index_cloud_only_files": self.index_cloud_only_files,
             "exclude_dir_names": sorted(self.exclude_dir_names),
         }
@@ -323,12 +339,24 @@ class Config:
         hotkey = raw.get("hotkey")
         if isinstance(hotkey, str) and hotkey.strip():
             config.hotkey = hotkey.strip()
+        custom = raw.get("hotkey_custom")
+        if isinstance(custom, bool):
+            config.hotkey_is_custom = custom
+        elif config.hotkey.lower() != DEFAULT_HOTKEY:
+            # Configs written before hotkey_custom existed: a non-default combo
+            # can only have come from the user.
+            config.hotkey_is_custom = True
 
         for name in ("ocr_max_dimension", "max_retries"):
             value = raw.get(name)
             if isinstance(value, int) and value >= 0:
                 setattr(config, name, value)
-        for name in ("onnx_threads", "vision_batch_size"):
+        for name in (
+            "onnx_threads",
+            "vision_batch_size",
+            "max_visual_results",
+            "video_frames_per_turn",
+        ):
             value = raw.get(name)
             if isinstance(value, int) and value >= 1:
                 setattr(config, name, value)
@@ -338,7 +366,15 @@ class Config:
                 setattr(config, name, float(value))
         similarity = raw.get("min_visual_similarity")
         if isinstance(similarity, (int, float)) and 0.0 <= float(similarity) <= 1.0:
-            config.min_visual_similarity = float(similarity)
+            if abs(float(similarity) - 0.25) < 1e-9:
+                # 0.25 was the old default before calibration showed that real
+                # hits and noise overlap there; keep the new garbage floor.
+                log.info(
+                    "Migrating min_visual_similarity from the old 0.25 default to %.2f",
+                    config.min_visual_similarity,
+                )
+            else:
+                config.min_visual_similarity = float(similarity)
         cloud_only = raw.get("index_cloud_only_files")
         if isinstance(cloud_only, bool):
             config.index_cloud_only_files = cloud_only

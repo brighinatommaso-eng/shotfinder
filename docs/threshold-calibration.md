@@ -55,18 +55,40 @@ not only noise: several "competing" images are the same subject (e.g. the
 Claude handbook cover vs its thumbnail), so exact-file ranking is the wrong
 success metric here.
 
-Decision: keep `min_visual_similarity = 0.25`.
+A 0.25 floor hid real hits (0.2133, 0.2195, 0.2264) while a noise query still
+reached 0.2503. Tightening to 0.251 would be inside measurement noise and would
+drop `hexapod assembly` at 0.2507. There is no honest single cutoff, so the
+product no longer pretends there is one.
 
-- It rejects the original failure mode: `spiaggia` noise at 0.21–0.24
-  (top false positive 0.2383).
-- It keeps the strong visual hits (0.25–0.38).
-- One measured noise query reaches 0.2503, 0.0003 above the floor; separating it
-  would require 0.251, which is within measurement noise and would drop the
-  `hexapod assembly` hit at 0.2507.
-- The two weak Italian OCR-heavy photos (0.2195, 0.2264) are better served by
-  text search, which already finds them via OCR.
+### Decision: a garbage floor plus a separate "Related" group
+
+`min_visual_similarity = 0.20` is now only a **garbage floor**: it removes
+vectors that are essentially unrelated to the query. It is not a relevance
+classifier. Everything above it that is not backed by text is presented
+honestly:
+
+- **Matches** — text hits and both-hits, ordered by reciprocal rank fusion.
+  Text is literal evidence, so this list is not capped by the visual threshold.
+- **Related by appearance** — visual-only hits above the floor, ordered by
+  cosine, capped at `max_visual_results` (default 8). The UI labels the section
+  "Related by appearance · approximate" and mutes it; the CLI prints it under
+  its own header. A relative margin of 0.05 drops a weak tail that is only
+  slightly below the best hit.
+
+This keeps the strong hits (0.21–0.38) visible, shows the weak-but-real Italian
+photos instead of hiding them, and stops approximate results from looking
+certain. `spiaggia` noise at 0.2383 now appears as a clearly-labelled
+suggestion rather than a confident match.
 
 A z-score gate was measured but not adopted: noise reaches z 2.38 while valid
 hits fall to z 0.07, so any z threshold either drops real hits or keeps noise.
-If the corpus grows, re-run the tool with new pairs and noise queries before
-changing the default.
+
+### Roadmap
+
+The shipped CLIP pair is the limiting factor. A SigLIP 2 image/text model has
+markedly better retrieval separation; when it is bundled, re-run this
+calibration before changing the floor. Until then, visual search stays
+approximate by design.
+
+If the corpus grows, re-run `tools/calibrate_threshold.py` with new pairs and
+noise queries before changing the default.

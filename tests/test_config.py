@@ -45,12 +45,88 @@ def test_malformed_config_logs_a_warning_with_path(
 
 def test_min_visual_similarity_defaults_and_roundtrips(tmp_path: Path) -> None:
     config = Config(data_dir=tmp_path)
-    assert config.min_visual_similarity == 0.25
+    # 0.20 is a garbage floor only; see docs/threshold-calibration.md.
+    assert config.min_visual_similarity == 0.20
 
     config.min_visual_similarity = 0.31
     config.save()
 
     assert Config.load(tmp_path).min_visual_similarity == 0.31
+
+
+def test_related_cap_and_video_turn_defaults_roundtrip(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    assert config.max_visual_results == 8
+    assert config.video_frames_per_turn == 30
+
+    config.max_visual_results = 3
+    config.video_frames_per_turn = 12
+    config.save()
+
+    loaded = Config.load(tmp_path)
+    assert loaded.max_visual_results == 3
+    assert loaded.video_frames_per_turn == 12
+
+
+def test_the_old_025_similarity_default_is_migrated(tmp_path: Path) -> None:
+    # 0.25 was the default before calibration; it is not a user choice.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"min_visual_similarity": 0.25}), encoding="utf-8"
+    )
+
+    assert Config.load(tmp_path).min_visual_similarity == 0.20
+
+
+def test_a_tuned_similarity_is_kept(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"min_visual_similarity": 0.28}), encoding="utf-8"
+    )
+
+    assert Config.load(tmp_path).min_visual_similarity == 0.28
+
+
+def test_hotkey_is_not_marked_custom_by_default(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    config.save()
+
+    loaded = Config.load(tmp_path)
+
+    assert loaded.hotkey == "ctrl+alt+space"
+    assert loaded.hotkey_is_custom is False
+
+
+def test_a_hotkey_chosen_by_the_app_stays_automatic(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    config.hotkey = "ctrl+shift+space"
+    config.hotkey_is_custom = False
+    config.save()
+
+    loaded = Config.load(tmp_path)
+
+    assert loaded.hotkey == "ctrl+shift+space"
+    assert loaded.hotkey_is_custom is False
+
+
+def test_an_explicit_hotkey_is_marked_custom(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"hotkey": "ctrl+alt+f"}), encoding="utf-8"
+    )
+
+    loaded = Config.load(tmp_path)
+
+    assert loaded.hotkey == "ctrl+alt+f"
+    assert loaded.hotkey_is_custom is True
+
+
+def test_an_old_config_with_a_non_default_hotkey_is_treated_as_explicit(
+    tmp_path: Path,
+) -> None:
+    # Written before hotkey_custom existed: a non-default combo came from the user.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"hotkey": "alt+shift+s"}), encoding="utf-8"
+    )
+
+    assert Config.load(tmp_path).hotkey_is_custom is True
 
 
 def test_cloud_only_indexing_is_off_by_default_and_roundtrips(tmp_path: Path) -> None:

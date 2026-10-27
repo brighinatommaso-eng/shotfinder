@@ -91,7 +91,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
     query = " ".join(args.query).strip()
     index = Index(config.db_path)
     try:
-        rows = search(config, index, query, limit=args.limit)
+        results = search(config, index, query, limit=args.limit)
     finally:
         index.close()
 
@@ -102,23 +102,38 @@ def _cmd_search(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    if not rows:
+    if not results:
         print("No results.")
         return 0
 
-    for row in rows:
-        timestamp = row.get("ts")
-        prefix = f"[{_format_ts(float(timestamp))}] " if timestamp is not None else ""
-        print(f"[{row['match_type']}] {prefix}{row['path']}")
-        snippet = " ".join((row.get("snippet") or "").split())
-        if snippet:
-            print(f"    {snippet}")
-        if args.explain:
-            fts_rank = row.get("fts_rank")
-            cosine = row.get("cosine")
-            rank_text = "-" if fts_rank is None else str(fts_rank)
-            cosine_text = "-" if cosine is None else f"{float(cosine):.4f}"
-            print(f"    fts_rank={rank_text} cosine={cosine_text}")
+    def print_rows(rows: list[dict[str, object]]) -> None:
+        for row in rows:
+            timestamp = row.get("ts")
+            prefix = f"[{_format_ts(float(timestamp))}] " if timestamp is not None else ""
+            print(f"[{row['match_type']}] {prefix}{row['path']}")
+            snippet = " ".join((row.get("snippet") or "").split())
+            if snippet:
+                print(f"    {snippet}")
+            if args.explain:
+                fts_rank = row.get("fts_rank")
+                cosine = row.get("cosine")
+                rank_text = "-" if fts_rank is None else str(fts_rank)
+                cosine_text = "-" if cosine is None else f"{float(cosine):.4f}"
+                print(f"    fts_rank={rank_text} cosine={cosine_text}")
+
+    if not query:
+        print_rows(results.matches)
+        return 0
+
+    if results.matches:
+        print("Matches:")
+        print_rows(results.matches)
+    else:
+        print("No matches.")
+    if results.related:
+        print()
+        print("Related by appearance (approximate, best first):")
+        print_rows(results.related)
     return 0
 
 

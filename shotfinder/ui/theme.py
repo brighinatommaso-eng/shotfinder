@@ -135,6 +135,21 @@ ResultTile[selected="true"] {
 #TileName { color: %(text)s; font-size: 12px; font-weight: 600; }
 #TileMeta { color: %(muted)s; font-size: 10px; }
 #TileSnippet { color: %(faint)s; font-size: 10px; }
+#SectionHeader {
+    color: %(faint)s;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 10px 2px 0 2px;
+}
+#Timestamp {
+    background: rgba(0, 0, 0, 150);
+    color: #FFFFFF;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 9px;
+    font-weight: 600;
+}
 #Badge {
     border-radius: 4px;
     padding: 1px 5px;

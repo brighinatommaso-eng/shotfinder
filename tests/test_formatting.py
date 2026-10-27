@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from shotfinder.ui.formatting import clean_snippet, folder_label, format_date
+from shotfinder.ui.formatting import (
+    clean_snippet,
+    folder_label,
+    format_date,
+    format_timestamp,
+)
 
 
 def test_fts_match_markers_are_removed() -> None:
@@ -37,3 +42,11 @@ def test_date_is_formatted_or_blank() -> None:
 
 def test_folder_label_falls_back_to_the_full_parent() -> None:
     assert folder_label(r"C:\Users\tomma\Downloads\Hexapod\shot.jpg") == "Hexapod"
+
+
+def test_video_timestamps_use_minutes_and_hours() -> None:
+    assert format_timestamp(134) == "02:14"
+    assert format_timestamp(3725) == "1:02:05"
+    assert format_timestamp(0) == "00:00"
+    assert format_timestamp(-4) == "00:00"
+    assert format_timestamp(None) == ""
