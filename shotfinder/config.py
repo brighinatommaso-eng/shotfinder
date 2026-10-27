@@ -156,9 +156,9 @@ class Config:
         if not path.is_file():
             return config
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            log.exception("Could not read %s; using defaults", path)
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            log.warning("Could not read %s: %s; using defaults", path, exc)
             return config
         if not isinstance(raw, dict):
             log.warning("%s does not contain a JSON object; using defaults", path)
