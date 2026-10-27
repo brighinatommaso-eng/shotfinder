@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import psutil
 from PIL import Image
@@ -27,6 +27,8 @@ from .index import Index
 
 log = logging.getLogger(__name__)
 
+ProgressCallback = Callable[[dict[str, int]], None]
+
 
 class Indexer:
     """Owns the indexing thread and its in-memory queue.
@@ -35,9 +37,16 @@ class Indexer:
     every stage writes its result before the next stage begins.
     """
 
-    def __init__(self, config: Config, index: Index) -> None:
+    def __init__(
+        self,
+        config: Config,
+        index: Index,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         self.config = config
         self.index = index
+        self._on_progress = on_progress
         self._queue: queue.Queue[int] = queue.Queue()
         self._retries: list[tuple[float, int, int]] = []
         self._attempts: dict[int, int] = {}
@@ -112,6 +121,16 @@ class Indexer:
                 "retries": len(self._retries),
             }
 
+    def _notify_progress(self) -> None:
+        """Report a stats snapshot; runs on whichever thread changed the queue."""
+        callback = self._on_progress
+        if callback is None:
+            return
+        try:
+            callback(self.stats)
+        except Exception:
+            log.debug("Progress callback failed", exc_info=True)
+
     # -- queue ---------------------------------------------------------------
 
     def enqueue(self, path: str | Path) -> bool:
@@ -141,6 +160,7 @@ class Indexer:
         with self._cond:
             self._outstanding += 1
         self._queue.put(file_id)
+        self._notify_progress()
 
     def _recover_pending(self) -> None:
         rows = self.index.next_pending(limit=-1)
@@ -170,11 +190,20 @@ class Indexer:
         """Queue images indexed before the vision models were available."""
         if not models.models_ready(self.config.models_dir):
             return
+        count = self.backfill_vision()
+        if count:
+            log.info("Queued %d image(s) for vision backfill", count)
+
+    def backfill_vision(self) -> int:
+        """Queue every image that has OCR but no visual embedding."""
         rows = self.index.next_vision_backfill(limit=-1)
         for row in rows:
             self._push(int(row["id"]))
-        if rows:
-            log.info("Queued %d image(s) for vision backfill", len(rows))
+        return len(rows)
+
+    def prepare_vision(self) -> None:
+        """Import the ONNX runtime from the calling (main) thread."""
+        self._load_vision_runtime()
 
     def purge_excluded(self) -> int:
         """Delete rows that are now outside the media scope.
@@ -233,6 +262,7 @@ class Indexer:
                     self._outstanding = max(0, self._outstanding - 1)
                     if self._outstanding == 0:
                         self._cond.notify_all()
+                self._notify_progress()
 
     def _lower_priority(self) -> None:
         try:
@@ -432,3 +462,4 @@ class Indexer:
     def _count(self, key: str) -> None:
         with self._cond:
             self._stats[key] += 1
+        self._notify_progress()
