@@ -469,12 +469,14 @@ class _Selftest:
                     continue
                 problems.append(f"{name}: status {row['status']}: {row['error']}")
 
+        speech = self._speech_diagnostics()
         if problems:
-            raise RuntimeError("; ".join(problems))
+            raise RuntimeError(f"{'; '.join(problems)}; speech={speech!r}")
         return {
             "found": found,
             "rows": len(rows),
             "stats": stats,
+            "speech": speech,
             "files": {
                 name: {
                     "status": by_name[name]["status"],
@@ -484,6 +486,28 @@ class _Selftest:
                 for name in FIXTURE_NAMES
                 if name in by_name
             },
+        }
+
+    def _speech_diagnostics(self) -> dict[str, Any]:
+        """What the speech stage actually produced, for a failing CI run."""
+        index = self._require_index()
+        row = index.find_by_path(self.fixtures_dir / "talk.mp4")
+        if row is None:
+            return {"indexed": False}
+        coverage = index.video_coverage(int(row["id"])) or {}
+        segments = index.conn.execute(
+            "SELECT ts, content FROM text_fts WHERE file_id = ? AND source = 'speech' "
+            "ORDER BY ts",
+            (int(row["id"]),),
+        ).fetchall()
+        return {
+            "indexed": True,
+            "speech": coverage.get("speech"),
+            "speech_reason": coverage.get("speech_reason"),
+            "speech_segments": coverage.get("speech_segments"),
+            "has_audio": coverage.get("has_audio"),
+            "duration": coverage.get("duration"),
+            "rows": [[row[0], row[1]] for row in segments],
         }
 
     def _on_index_progress(self, stats: dict[str, Any]) -> None:
@@ -555,10 +579,14 @@ class _Selftest:
         hit = self._search_hit(SPEECH_QUERY, "talk.mp4")
         if hit["match_type"] not in ("text", "both"):
             raise RuntimeError(
-                f"{SPEECH_QUERY!r} matched {hit['match_type']}, expected speech text"
+                f"{SPEECH_QUERY!r} matched {hit['match_type']}, expected speech text; "
+                f"speech={self._speech_diagnostics()!r}"
             )
         if hit.get("ts") is None:
-            raise RuntimeError(f"{SPEECH_QUERY!r} matched talk.mp4 without a timestamp")
+            raise RuntimeError(
+                f"{SPEECH_QUERY!r} matched talk.mp4 without a timestamp; "
+                f"speech={self._speech_diagnostics()!r}"
+            )
         return {
             "query": SPEECH_QUERY,
             "path": hit["path"],

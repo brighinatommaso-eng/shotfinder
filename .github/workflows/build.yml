@@ -116,3 +116,6 @@ jobs:
             dist/SHA256SUMS.txt
             dist/runtime-deps.json
             ci-data/selftest-report.json
+            ci-data/index.db
+            ci-data/index.db-wal
+            ci-data/logs/shotfinder.log
