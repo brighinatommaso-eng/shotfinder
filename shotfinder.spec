@@ -36,6 +36,8 @@ datas = [
     # faster-whisper resolves the Silero VAD model relative to its package
     # directory; without it every transcription fails at runtime.
     *collect_data_files("faster_whisper"),
+    # `ShotFinder.exe --selftest` indexes these; they must ship with the exe.
+    *collect_data_files("shotfinder", includes=["selftest_fixtures/*"]),
 ]
 
 hiddenimports = [

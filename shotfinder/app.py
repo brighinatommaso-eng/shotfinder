@@ -468,6 +468,12 @@ class ShotFinderApp:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "--selftest":
+        from .selftest import run_selftest
+
+        return run_selftest(args[1] if len(args) == 2 else None)
+
     config = Config.load()
     first_run = not config.config_path.is_file()
     setup_logging(config)

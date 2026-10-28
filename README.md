@@ -24,7 +24,7 @@ in the system tray.
 
 ## Quick start
 
-1. **Download and unzip.** Get `ShotFinder-0.1.0-win64.zip` from the
+1. **Download and unzip.** Get `ShotFinder-0.1.1-win64.zip` from the
    [releases page](https://github.com/brighinatommaso-eng/shotfinder/releases/latest)
    and extract it anywhere, for example `C:\Users\you\Desktop\ShotFinder`.
    Double-click `ShotFinder.exe`.
@@ -120,6 +120,8 @@ Windows cannot decode the codec, ShotFinder shows the matched frame and an
   still indexed; raise the limit in Settings if you need the audio.
 - **The executable is unsigned.** SmartScreen shows "More info → Run anyway"
   the first time. Building from source avoids that dialog.
+- **The Visual C++ runtime is bundled.** A machine without the Microsoft
+  redistributable can still run the release.
 - **Video playback depends on Windows codecs.** Common MP4/WebM files play;
   exotic formats fall back to the matched still frame.
 - **The first visual query is slow** while the model loads; later ones reuse it.
@@ -128,7 +130,8 @@ Windows cannot decode the codec, ShotFinder shows the matched frame and an
 
 Requirements: Python 3.11 or newer, 64-bit, and the
 [Microsoft Visual C++ runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-(already present on most PCs).
+on the build machine. The release bundle carries the redistributable DLLs it
+imports, so users do not need to install it.
 
 ```powershell
 git clone https://github.com/brighinatommaso-eng/shotfinder.git
@@ -142,7 +145,7 @@ py -3.11 -m venv .venv
 # tests
 .\.venv\Scripts\python.exe -m pytest -q
 
-# build the release zip (dist\ShotFinder-0.1.0-win64.zip)
+# build the release zip (dist\ShotFinder-0.1.1-win64.zip)
 powershell -ExecutionPolicy Bypass -File tools\build.ps1
 ```
 
@@ -151,8 +154,10 @@ windowed, app icon and version resource) and prints the zip size, the unpacked
 size and the SHA-256. Models are never bundled: the app downloads them to
 `%LOCALAPPDATA%\ShotFinder\models` on first run.
 
-A clean-machine check in Windows Sandbox is described in
-[docs/clean-test.md](docs/clean-test.md).
+A clean-machine check in a new local Windows account is described in
+[docs/clean-test.md](docs/clean-test.md). Every tag is built on a clean GitHub
+Actions `windows-latest` runner, where `ShotFinder.exe --selftest <data_dir>`
+indexes bundled fixtures and runs a text, visual and spoken query.
 
 ### How it works
 
@@ -174,6 +179,19 @@ python -m shotfinder.cli search --explain           # show ranking evidence
 python -m shotfinder.cli models status              # what is downloaded
 python -m shotfinder.cli models download            # fetch the models
 ```
+
+### Self-test
+
+The packaged build can verify itself without opening the UI:
+
+```powershell
+.\ShotFinder.exe --selftest "$env:TEMP\shotfinder-selftest"
+```
+
+It downloads the models into that folder, indexes three bundled fixtures, runs
+one text, one visual and one spoken query, writes `selftest-report.json` there,
+and exits 0 only if every check passes. Windows OCR is reported as
+`unavailable` (not a failure) on Windows Server without a recognizer.
 
 ## Roadmap
 

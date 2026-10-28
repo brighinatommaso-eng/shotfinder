@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Cleans the previous build, renders the icon, runs PyInstaller with the
-    committed spec, then zips the one-folder build to
-    dist\ShotFinder-0.1.0-win64.zip. Models are not included: the app downloads
+    committed spec, audits the DLL imports, then zips the one-folder build to
+    dist\ShotFinder-0.1.1-win64.zip. Models are not included: the app downloads
     them on first run.
 
 .EXAMPLE
@@ -14,7 +14,7 @@
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$version = "0.1.0"
+$version = "0.1.1"
 $python = Join-Path $root ".venv\Scripts\python.exe"
 $zip = Join-Path $root "dist\ShotFinder-$version-win64.zip"
 $folder = Join-Path $root "dist\ShotFinder"
@@ -63,6 +63,12 @@ if (-not (Test-Path (Join-Path $folder "ShotFinder.exe"))) {
     throw "Build finished without dist\ShotFinder\ShotFinder.exe"
 }
 
+Write-Host "== Checking runtime dependencies" -ForegroundColor Cyan
+$depsJson = Join-Path $root "dist\runtime-deps.json"
+if ((Invoke-Tool @((Join-Path $root "tools\check_runtime_deps.py"), $folder, "--json", $depsJson)) -ne 0) {
+    throw "The bundle imports DLLs that are neither bundled nor part of Windows (see the report above)."
+}
+
 Write-Host "== Zipping" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force (Split-Path -Parent $zip) | Out-Null
 Compress-Archive -Path $folder -DestinationPath $zip -CompressionLevel Optimal
@@ -77,3 +83,4 @@ Write-Host "Built ShotFinder $version" -ForegroundColor Green
 Write-Host ("  zip      {0}  ({1:N1} MB)" -f $zip, $zipMb)
 Write-Host ("  unpacked {0}  ({1:N1} MB)" -f $folder, $folderMb)
 Write-Host ("  sha256   {0}" -f $sha)
+Write-Host ("  deps     {0}" -f $depsJson)
