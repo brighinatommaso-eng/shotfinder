@@ -40,6 +40,7 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 VIDEO_NOT_IMPLEMENTED_REASON = "video indexing is not implemented yet (Phase 4)"
 VIDEO_MODELS_REASON = "vision models missing; install them to index videos"
 VIDEO_EMPTY_REASON = "no video frames could be decoded"
+VIDEO_DISABLED_REASON = "video frames are turned off in settings"
 SPEECH_NO_AUDIO_REASON = "no audio stream"
 SPEECH_TOO_LONG_REASON = "longer than speech_max_minutes"
 
@@ -297,13 +298,59 @@ class Indexer:
 
     def backfill_speech(self) -> int:
         """Queue videos that finished frames while the speech model was missing."""
-        if not models.speech_ready(self.config.models_dir):
+        if not self.config.index_speech or not models.speech_ready(
+            self.config.models_dir
+        ):
             return 0
         max_seconds = max(0, self.config.speech_max_minutes) * 60
         rows = self.index.next_speech_pending(max_seconds, limit=-1)
         for file_id in rows:
             self._push_speech(file_id)
         return len(rows)
+
+    def resume_video_frames(self) -> int:
+        """Queue videos that were skipped while frame indexing was off."""
+        file_ids = self.index.reset_skipped_videos(VIDEO_DISABLED_REASON)
+        for file_id in file_ids:
+            self._push(file_id, "video")
+        if file_ids:
+            log.info("Queued %d video(s) after enabling frames", len(file_ids))
+        return len(file_ids)
+
+    def apply_speech_limit(self) -> int:
+        """Reconsider videos that were too long for the old speech cap."""
+        if not self.config.index_speech:
+            return 0
+        max_seconds = max(0, int(self.config.speech_max_minutes)) * 60
+        reset = self.index.reset_speech_skipped(SPEECH_TOO_LONG_REASON, max_seconds)
+        if reset:
+            log.info("Reconsidering %d video(s) for speech", reset)
+        return self.backfill_speech()
+
+    def clear_queue(self) -> None:
+        """Drop queued work and counters before a full index rebuild."""
+        with self._cond:
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._retries.clear()
+            self._attempts.clear()
+            self._outstanding = 0
+            self._stats = {
+                "enqueued": 0,
+                "processed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "purged": 0,
+            }
+            self._activity = None
+            self._ocr_error = None
+            self._vision_missing_logged = False
+            self._speech_missing_logged = False
+            self._cond.notify_all()
+        self._notify_progress()
 
     def prepare_vision(self) -> None:
         """Import the ONNX runtime from the calling (main) thread."""
@@ -447,6 +494,8 @@ class Indexer:
         if row is None:
             return None
         if stage == STAGE_SPEECH:
+            if not self.config.index_speech:
+                return None
             return self._process_speech(row)
         stages = {name for name in (row["stages_done"] or "").split(",") if name}
         kind = str(row["kind"])
@@ -484,6 +533,16 @@ class Indexer:
         file_id = int(row["id"])
         path = Path(row["path"])
         content_hash = row["hash"]
+
+        if not self.config.index_video_frames:
+            if self.index.mark_status(
+                file_id,
+                "skipped",
+                VIDEO_DISABLED_REASON,
+                expected_hash=content_hash,
+            ):
+                self._count("skipped")
+            return None
 
         if not models.models_ready(self.config.models_dir):
             if self.index.mark_status(
@@ -655,6 +714,8 @@ class Indexer:
 
     def _maybe_enqueue_speech(self, file_id: int, row: dict[str, Any]) -> None:
         """Queue transcription once frames are done, unless it cannot help."""
+        if not self.config.index_speech:
+            return
         coverage = self.index.video_coverage(file_id)
         if coverage is None or coverage["speech"] is not None:
             return

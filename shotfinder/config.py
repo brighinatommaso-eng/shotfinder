@@ -212,6 +212,10 @@ class Config:
     min_visual_similarity: float = 0.20
     max_visual_results: int = 8
     video_frames_per_turn: int = 30
+    # Both stages can be switched off from the settings window; the rest of the
+    # index keeps working.
+    index_video_frames: bool = True
+    index_speech: bool = True
     # Videos longer than this are not transcribed; frames still index them.
     speech_max_minutes: int = 60
     index_cloud_only_files: bool = False
@@ -287,6 +291,8 @@ class Config:
             "min_visual_similarity": self.min_visual_similarity,
             "max_visual_results": self.max_visual_results,
             "video_frames_per_turn": self.video_frames_per_turn,
+            "index_video_frames": self.index_video_frames,
+            "index_speech": self.index_speech,
             "speech_max_minutes": self.speech_max_minutes,
             "index_cloud_only_files": self.index_cloud_only_files,
             "exclude_dir_names": sorted(self.exclude_dir_names),
@@ -378,7 +384,8 @@ class Config:
                 )
             else:
                 config.min_visual_similarity = float(similarity)
-        cloud_only = raw.get("index_cloud_only_files")
-        if isinstance(cloud_only, bool):
-            config.index_cloud_only_files = cloud_only
+        for name in ("index_video_frames", "index_speech", "index_cloud_only_files"):
+            value = raw.get(name)
+            if isinstance(value, bool):
+                setattr(config, name, value)
         return config

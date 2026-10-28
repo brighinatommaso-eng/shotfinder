@@ -422,3 +422,151 @@ def test_record_probe_reports_the_sampling_from_the_vectors(
     assert coverage["last_ts"] == 10.0
     assert coverage["complete"] == 1
     assert coverage["has_audio"] == 1
+
+def test_stats_report_files_videos_vectors_and_size(index: Index, tmp_path: Path) -> None:
+    image = _make_file(tmp_path / "photo.png", b"photo")
+    video = _make_file(tmp_path / "clip.mp4", b"clip")
+    image_id, _ = index.upsert_file(image, "image")
+    video_id, _ = index.upsert_file(video, "video")
+    index.add_vectors(image_id, [(None, [0.0] * 512)])
+    index.add_vectors(video_id, [(0.0, [0.0] * 512), (5.0, [0.0] * 512)])
+
+    stats = index.stats()
+
+    assert stats["files"] == 2
+    assert stats["videos"] == 1
+    assert stats["vectors"] == 3
+    assert stats["db_bytes"] > 0
+
+
+def test_delete_under_removes_only_that_subtree(index: Index, tmp_path: Path) -> None:
+    keep = _make_file(tmp_path / "keep.png", b"keep")
+    inside = tmp_path / "old" / "inside.png"
+    inside.parent.mkdir()
+    _make_file(inside, b"inside")
+    keep_id, _ = index.upsert_file(keep, "image")
+    inside_id, _ = index.upsert_file(inside, "image")
+    index.add_text_rows(inside_id, ["removed text"], source="ocr")
+
+    removed = index.delete_under(tmp_path / "old")
+
+    assert removed == 1
+    assert index.get_file(inside_id) is None
+    assert index.get_file(keep_id) is not None
+    assert _count(index, "SELECT COUNT(*) FROM text_fts WHERE file_id = ?", (inside_id,)) == 0
+
+
+def test_clear_all_empties_every_table(index: Index, tmp_path: Path) -> None:
+    path = _make_file(tmp_path / "photo.png", b"photo")
+    file_id, _ = index.upsert_file(path, "image")
+    index.add_text_rows(file_id, ["text"], source="ocr")
+    index.add_vectors(file_id, [(None, [0.0] * 512)])
+    index.set_speech_state(file_id, "done", segments=1)
+
+    index.clear_all()
+
+    assert index.stats()["files"] == 0
+    assert _count(index, "SELECT COUNT(*) FROM text_fts") == 0
+    assert _count(index, "SELECT COUNT(*) FROM vec_meta") == 0
+    assert _count(index, "SELECT COUNT(*) FROM vec_items") == 0
+    assert _count(index, "SELECT COUNT(*) FROM video_coverage") == 0
+
+
+def test_cloud_only_count_is_scoped_to_a_folder(index: Index, tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    for folder in (first, second):
+        path = folder / "placeholder.png"
+        path.write_bytes(b"cloud")
+        index.mark_cloud_only(path, "image")
+
+    assert index.cloud_only_count_under(first) == 1
+    assert index.cloud_only_count_under(tmp_path) == 2
+    assert index.cloud_only_count_under(tmp_path / "missing") == 0
+
+
+def test_reset_speech_skipped_only_resets_videos_that_now_fit(
+    index: Index, tmp_path: Path
+) -> None:
+    short = _make_file(tmp_path / "short.mp4", b"short")
+    long = _make_file(tmp_path / "long.mp4", b"long")
+    short_id, _ = index.upsert_file(short, "video")
+    long_id, _ = index.upsert_file(long, "video")
+    index.record_probe(short_id, duration=30.0, has_audio=True)
+    index.record_probe(long_id, duration=120.0, has_audio=True)
+    index.set_speech_state(short_id, "skipped", reason="longer than speech_max_minutes")
+    index.set_speech_state(long_id, "skipped", reason="longer than speech_max_minutes")
+
+    reset = index.reset_speech_skipped("longer than speech_max_minutes", 60)
+
+    assert reset == 1
+    assert index.video_coverage(short_id)["speech"] is None
+    assert index.video_coverage(long_id)["speech"] == "skipped"
+
+def test_upsert_file_retries_when_another_thread_wins_the_insert(
+    index: Index, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    path = _make_file(tmp_path / "photo.png", b"photo")
+    calls = {"count": 0}
+    original = Index._upsert_file
+
+    def flaky(self, item, kind):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: files.path")
+        return original(self, item, kind)
+
+    monkeypatch.setattr(Index, "_upsert_file", flaky)
+
+    file_id, needs_indexing = index.upsert_file(path, "image")
+
+    assert calls["count"] == 2
+    assert needs_indexing is True
+    assert index.get_file(file_id)["path"].endswith("photo.png")
+
+
+def test_upsert_file_survives_concurrent_calls_for_one_path(
+    index: Index, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from shotfinder import index as index_module
+
+    path = _make_file(tmp_path / "shared.png", b"shared")
+    barrier = threading.Barrier(2)
+    real_hash = index_module.compute_file_hash
+
+    def slow_hash(item):
+        digest = real_hash(item)
+        try:
+            barrier.wait(timeout=5)
+        except threading.BrokenBarrierError:
+            pass
+        return digest
+
+    monkeypatch.setattr(index_module, "compute_file_hash", slow_hash)
+    errors: list[BaseException] = []
+    results: list[tuple[int, bool]] = []
+
+    def worker() -> None:
+        try:
+            results.append(index.upsert_file(path, "image"))
+        except BaseException as exc:  # pragma: no cover - the assertion reports it
+            errors.append(exc)
+        finally:
+            index.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert errors == []
+    assert len(results) == 2
+    assert len({file_id for file_id, _ in results}) == 1
+    assert _count(index, "SELECT COUNT(*) FROM files") == 1

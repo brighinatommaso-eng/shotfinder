@@ -8,37 +8,43 @@ version = "0.1.0"
 description = "Local, offline search for screenshots, photos and videos"
 requires-python = ">=3.11"
 dependencies = [
-  "watchdog>=4,<7",
-  "xxhash>=3.4",
-  "Pillow>=10",
-  "imageio-ffmpeg>=0.5",
-  "numpy>=1.26",
-  "onnxruntime>=1.20",
-  "tokenizers>=0.20",
-  "psutil>=5.9",
-  "sqlite-vec>=0.1.6",
-  "PySide6>=6.6",
-  "faster-whisper>=1.2",
-  "winrt-runtime>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Foundation>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Foundation.Collections>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Globalization>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Graphics.Imaging>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Media.Ocr>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Storage>=3.2.1,<4; sys_platform == 'win32'",
-  "winrt-Windows.Storage.Streams>=3.2.1,<4; sys_platform == 'win32'",
+  "watchdog==6.0.0",
+  "xxhash==4.0.2",
+  "Pillow==13.0.0",
+  "imageio-ffmpeg==0.6.0",
+  "numpy==2.4.6",
+  "onnxruntime==1.31.1",
+  "tokenizers==0.23.3",
+  "psutil==7.2.2",
+  "sqlite-vec==0.1.9",
+  "PySide6==6.12.0",
+  "faster-whisper==1.2.1",
+  "ctranslate2==4.8.4",
+  "winrt-runtime==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Foundation==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Globalization==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Media.Ocr==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Storage==3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams==3.2.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest==9.1.1"]
 # Dev-only toolchain for tools/export_models.py; never needed at runtime.
 export = [
-  "torch>=2.4",
-  "transformers>=4.40",
-  "sentence-transformers>=3",
-  "onnx>=1.16",
-  "onnxruntime>=1.20",
-  "accelerate>=0.30",
+  "torch==2.14.1",
+  "transformers==5.21.0",
+  "sentence-transformers==6.2.0",
+  "onnx==1.23.2",
+  "onnxruntime==1.31.1",
+  "accelerate==1.15.0",
+]
+# Build-only toolchain for tools/build.ps1; never needed at runtime.
+build = [
+  "pyinstaller==6.22.3",
+  "pyinstaller-hooks-contrib==2026.9",
 ]
 
 [tool.setuptools.packages.find]

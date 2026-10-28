@@ -12,6 +12,7 @@ from shotfinder.config import Config
 from shotfinder.extractors.video import Frame, FrameCursor
 from shotfinder.index import Index
 from shotfinder.worker import (
+    VIDEO_DISABLED_REASON,
     VIDEO_MODELS_REASON,
     VIDEO_NOT_IMPLEMENTED_REASON,
     Indexer,
@@ -195,3 +196,19 @@ def test_images_are_dequeued_before_videos(tmp_path: Path) -> None:
         assert order == [2, 1, 3]
     finally:
         index.close()
+
+
+def test_frames_toggle_skips_and_resumes(video_setup) -> None:
+    indexer, index, file_id = video_setup
+    indexer.config.index_video_frames = False
+
+    assert indexer._process_video(index.get_file(file_id)) is None
+    row = index.get_file(file_id)
+    assert row["status"] == "skipped"
+    assert row["error"] == VIDEO_DISABLED_REASON
+    assert indexer.stats["skipped"] == 1
+
+    indexer.config.index_video_frames = True
+    assert indexer.resume_video_frames() == 1
+    assert index.get_file(file_id)["status"] == "pending"
+    assert indexer.stats["outstanding"] == 1

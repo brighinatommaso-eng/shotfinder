@@ -36,6 +36,7 @@ class TrayIcon(QObject):
     toggle_pause = Signal()
     download_models = Signal()
     open_data_folder = Signal()
+    open_settings = Signal()
     quit_requested = Signal()
 
     def __init__(self, indexer: Indexer, parent: QObject | None = None) -> None:
@@ -64,6 +65,9 @@ class TrayIcon(QObject):
         self._models_action.triggered.connect(self.download_models.emit)
         self._data_action = self._menu.addAction("Open data folder")
         self._data_action.triggered.connect(self.open_data_folder.emit)
+        self._menu.addSeparator()
+        self._settings_action = self._menu.addAction("Settings…")
+        self._settings_action.triggered.connect(self.open_settings.emit)
         self._menu.addSeparator()
         self._quit_action = self._menu.addAction("Quit")
         self._quit_action.triggered.connect(self.quit_requested.emit)

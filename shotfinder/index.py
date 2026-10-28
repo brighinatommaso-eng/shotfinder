@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import sqlite3
 import threading
@@ -12,6 +14,8 @@ import sqlite_vec
 import xxhash
 
 from .exclusions import CLOUD_ONLY_REASON
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -227,6 +231,16 @@ class Index:
         and ``needs_indexing`` is False. A copy (old path still exists) gets its
         own row.
         """
+        try:
+            return self._upsert_file(path, kind)
+        except sqlite3.IntegrityError:
+            # The scan thread and a watcher event can insert the same path at
+            # the same time: the loser then hits UNIQUE(path). Re-reading finds
+            # the winner's row, so the second attempt takes the fast path.
+            log.info("Concurrent index update for %s; retrying", path)
+            return self._upsert_file(path, kind)
+
+    def _upsert_file(self, path: str | Path, kind: str) -> tuple[int, bool]:
         path = _normalise_path(path)
         stat = path.stat()
         key = str(path)
@@ -471,6 +485,76 @@ class Index:
     def all_files(self) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM files ORDER BY id").fetchall()
         return [dict(row) for row in rows]
+
+    def stats(self) -> dict[str, int]:
+        """Counts for the settings window; cheap enough to call on open."""
+        files = self.count_files()
+        videos = int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM files WHERE kind = 'video'"
+            ).fetchone()[0]
+        )
+        vectors = int(self.conn.execute("SELECT COUNT(*) FROM vec_meta").fetchone()[0])
+        db_bytes = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                db_bytes += self.db_path.with_name(self.db_path.name + suffix).stat().st_size
+            except OSError:
+                pass
+        return {
+            "files": files,
+            "videos": videos,
+            "vectors": vectors,
+            "db_bytes": db_bytes,
+        }
+
+    def clear_all(self) -> None:
+        """Delete every indexed row, then return the disk space to Windows."""
+        with self.conn as connection:
+            for table in (
+                "text_fts",
+                "vec_items",
+                "vec_meta",
+                "video_progress",
+                "video_coverage",
+                "files",
+            ):
+                connection.execute(f"DELETE FROM {table}")
+        try:
+            self.conn.execute("VACUUM")
+        except sqlite3.Error:
+            log.warning("Could not vacuum the index after clearing it", exc_info=True)
+
+    def delete_under(self, folder: str | Path) -> int:
+        """Delete rows for files inside *folder*; returns how many were removed."""
+        root = os.path.normcase(os.path.abspath(os.fspath(folder)))
+        prefix = root + os.sep
+        removed = 0
+        with self.conn as connection:
+            rows = connection.execute("SELECT id, path FROM files").fetchall()
+            for row in rows:
+                path = os.path.normcase(os.path.abspath(row["path"]))
+                if path != root and not path.startswith(prefix):
+                    continue
+                self._delete_content(connection, int(row["id"]))
+                connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+                removed += 1
+        return removed
+
+    def cloud_only_count_under(self, folder: str | Path) -> int:
+        """How many cloud placeholders are recorded below *folder*."""
+        root = os.path.normcase(os.path.abspath(os.fspath(folder)))
+        prefix = root + os.sep
+        rows = self.conn.execute(
+            "SELECT path FROM files WHERE status = 'skipped' AND error = ?",
+            (CLOUD_ONLY_REASON,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            path = os.path.normcase(os.path.abspath(row["path"]))
+            if path == root or path.startswith(prefix):
+                count += 1
+        return count
 
     def next_vision_backfill(self, limit: int = 100) -> list[dict[str, Any]]:
         """Images that finished OCR before the vision models were available."""
@@ -810,6 +894,33 @@ class Index:
                 },
             )
         return True
+
+    def reset_speech_skipped(self, reason: str, max_seconds: int) -> int:
+        """Make videos skipped for *reason* eligible for speech again.
+
+        Used when the user raises ``speech_max_minutes``: only videos that now
+        fit under the new cap are reset, so a lower cap never re-queues work
+        that would immediately be skipped again.
+        """
+        with self.conn as connection:
+            rows = connection.execute(
+                """
+                SELECT file_id FROM video_coverage
+                 WHERE speech = 'skipped' AND speech_reason = ?
+                   AND (? <= 0 OR duration IS NULL OR duration <= ?)
+                """,
+                (reason, max_seconds, max_seconds),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE video_coverage
+                       SET speech = NULL, speech_reason = NULL, speech_segments = 0
+                     WHERE file_id = ?
+                    """,
+                    (row["file_id"],),
+                )
+        return len(rows)
 
     def reset_truncated_videos(self) -> list[int]:
         """Queue videos whose frame sampling stopped before the end.

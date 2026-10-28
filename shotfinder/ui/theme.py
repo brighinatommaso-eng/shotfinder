@@ -211,6 +211,58 @@ QToolTip {
     border: 1px solid %(border)s;
     padding: 4px 6px;
 }
+#AppDialog { background: %(solid_window)s; }
+#DialogTitle { color: %(text)s; font-size: 20px; font-weight: 600; }
+#DialogBody { color: %(muted)s; font-size: 12px; }
+#DialogNote { color: %(faint)s; font-size: 11px; }
+#DialogStatus { color: %(muted)s; font-size: 11px; }
+#StatValue { color: %(text)s; font-size: 12px; font-weight: 600; }
+#StatLabel { color: %(muted)s; font-size: 11px; }
+#AppDialog QListWidget {
+    background: %(surface_hover)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+    color: %(text)s;
+    padding: 4px;
+}
+#AppDialog QListWidget::item { padding: 6px 4px; border-radius: 5px; }
+#AppDialog QListWidget::item:selected {
+    background: %(surface_selected)s;
+    color: %(text)s;
+}
+#AppDialog QPushButton {
+    background: %(surface_hover)s;
+    color: %(text)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 12px;
+}
+#AppDialog QPushButton:hover { background: %(surface_selected)s; }
+#AppDialog QPushButton:disabled { color: %(faint)s; }
+#AppDialog QPushButton#PrimaryButton {
+    background: %(accent_soft)s;
+    color: %(accent)s;
+    border: 1px solid %(border_strong)s;
+    font-weight: 600;
+}
+#AppDialog QCheckBox { color: %(text)s; font-size: 12px; spacing: 8px; }
+#AppDialog QSpinBox {
+    background: %(surface_hover)s;
+    color: %(text)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 4px 6px;
+}
+#AppDialog QLineEdit {
+    background: %(surface_hover)s;
+    color: %(text)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+#AppDialog QLineEdit[recording="true"] { border: 1px solid %(border_strong)s; }
 """
 
 

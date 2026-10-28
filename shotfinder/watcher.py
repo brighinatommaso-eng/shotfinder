@@ -232,6 +232,11 @@ class Watcher:
         self._handler = handler
         log.info("Watching %d folder(s): %s", len(roots), ", ".join(map(str, roots)))
 
+    def restart(self) -> None:
+        """Apply a changed watched-folder list without restarting the app."""
+        self.stop()
+        self.start()
+
     def stop(self) -> None:
         observer = self._observer
         handler = self._handler

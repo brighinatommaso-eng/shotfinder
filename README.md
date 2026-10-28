@@ -1,122 +1,186 @@
 # ShotFinder
 
-Find any screenshot, photo or video by what's written in it or what it shows. Local, offline, multilingual. Windows.
+Find any screenshot, photo or video by the text inside it or by what it shows.
+Everything runs on your own Windows PC.
 
-ShotFinder indexes your folders into a single local SQLite file, then searches it with text you remember: a word from a screenshot or a description of a scene. OCR reads text in images, a CLIP image encoder makes every image searchable by meaning, and a multilingual text encoder lets you query in Italian or English against the same visual space. Videos are sampled into frames and indexed the same way. Nothing leaves your machine.
+<!-- Demo GIF: record ~15 s (hotkey, one query, a video jumping to its spoken line),
+     save it as docs/screenshots/demo.gif, then replace the line below with
+     ![ShotFinder in action](docs/screenshots/demo.gif) -->
+*Demo GIF: `docs/screenshots/demo.gif` (recording pending).*
 
-## Status
+**[Download for Windows](https://github.com/brighinatommaso-eng/shotfinder/releases/latest)**
+· [How to build it yourself](#build-from-source) · [Known limitations](#known-limitations)
 
-Phase 5 of 6. Working today:
+## What it does
 
-- Folder scanning, live file watching, hash-based move/rename detection.
-- Windows OCR on images, stored in full-text search.
-- CLIP visual embeddings for images, stored in a local vector index.
-- Video frame indexing: one frame every 5 seconds, stretched to cover the whole file on long videos, near-duplicates dropped, with a timestamp for every hit.
-- Local speech transcription with Whisper: videos are searchable by what is said, with the spoken line and its timestamp. Transcribing runs after frames, only while nothing else is pending, and skips silent or very long videos.
-- Hybrid search that returns confident text matches and a separate, clearly-labelled "Related by appearance" group, with `--explain` showing the raw text rank, cosine similarity and match source per result.
-- A tray app with a Spotlight-style search window, keyboard navigation, preview, copy and reveal. Videos play in-app at the matched moment, two seconds before a spoken line.
-- Model download with SHA-256 verification and resume, from the CLI or the tray.
+You know the screenshot exists. You just cannot find it.
 
-Not built yet: packaging and first-run setup (Phase 6).
+ShotFinder reads the text in your screenshots and photos, recognises what the
+pictures show, and listens to what is said in your videos. Then you type
+whatever you remember and it opens the file — or the exact minute of the video.
 
-## Requirements
+It watches the folders you choose, keeps a local index, and stays out of the way
+in the system tray.
 
-- Windows 10 or 11, x64.
-- Python 3.11 or newer.
+## Quick start
 
-## Install
+1. **Download and unzip.** Get `ShotFinder-0.1.0-win64.zip` from the
+   [releases page](https://github.com/brighinatommaso-eng/shotfinder/releases/latest)
+   and extract it anywhere, for example `C:\Users\you\Desktop\ShotFinder`.
+   Double-click `ShotFinder.exe`.
 
-```powershell
-git clone https://github.com/brighinatommaso-eng/shotfinder.git
-cd shotfinder
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
-```
+   Windows may show "Windows protected your PC" because the app is not signed
+   yet. Click **More info → Run anyway**. It is a plain local program; nothing
+   is installed and nothing needs administrator rights.
 
-## Download the models
+2. **Pick your folders.** On the first launch a welcome window offers
+   Screenshots, Pictures, Videos and Downloads. Untick what you do not want,
+   then click **Start**. ShotFinder downloads about 635 MB of models once, in
+   the background. Text search works immediately; visual and spoken search turn
+   on when the download finishes.
 
-```powershell
-python -m shotfinder.cli models download
-```
+3. **Search.** Press `Ctrl+Alt+Space` (or click the tray icon) and type.
 
-That fetches about 640 MB into `%LOCALAPPDATA%\ShotFinder\models`: the CLIP image encoder (335 MB), the multilingual text encoder (129 MB), its tokenizer (3 MB) and the Whisper base speech model (145 MB, in `models\whisper-base`). Files are verified against pinned SHA-256 hashes and can resume after an interruption. `python -m shotfinder.cli models status` shows what is present. The CLIP files come from the `models-v1` release and Whisper from `models-v2`.
+That is it. New files are picked up automatically from then on.
 
-Without the models, indexing still runs OCR and search still returns text matches. The tray app offers to download them too: when they are missing it shows a notification, and the tray menu has a "Download models" item with progress in the tooltip. Text search works while that runs.
+## Three example queries
 
-## Run the app
+| You type | What it finds |
+| --- | --- |
+| `fattura enel` | The screenshot where that text is written, even if the file is called `IMG_2024_11_03.png`. |
+| `a beach at sunset` | Photos and video moments that *look* like that. These appear in a separate "Related by appearance" group, because visual matching is a suggestion, not a fact. |
+| `quick brown fox` | The video where someone says it. The result shows the line and its timestamp, and the player starts two seconds earlier. |
 
-```powershell
-python -m shotfinder
-```
+Text queries work in Italian and English against the same visual index.
 
-ShotFinder starts in the tray and indexes in the background; the tooltip shows `Idle`, `Indexing 132/2,048`, `Transcribing lecture.mp4 (34%)`, `Paused` or `Models missing`. `Ctrl+Alt+Space` opens the search window, and so do the tray icon and its menu. A second launch does not start a second copy: it asks the running one to show its window.
+## What you need
 
-If another app already owns `Ctrl+Alt+Space`, ShotFinder tries `Ctrl+Shift+Space`, `Ctrl+Alt+F`, `Ctrl+Shift+F12` and then `Alt+Shift+S`, keeps the first that registers and saves it to `config.json`; the tray tooltip and the first menu line show the active combo. A combo you set yourself is never overwritten: if it is taken, ShotFinder uses a fallback for that session and tells you. The tray menu also pauses or resumes indexing, opens the data folder and quits.
+- Windows 10 or 11, 64-bit.
+- About 700 MB of free space for the models, plus room for the index
+  (roughly a few hundred MB for tens of thousands of files).
+- No Python, no account, no configuration files.
+
+## Privacy
+
+Everything stays on this PC.
+
+- The index, the models and the logs live in `%LOCALAPPDATA%\ShotFinder`.
+- The only network access is the one-time model download.
+- No telemetry, no accounts, no uploads, no cloud sync.
+- Files that exist only in OneDrive/the cloud are skipped, never downloaded
+  behind your back.
+
+## Settings
+
+Right-click the tray icon → **Settings…**
+
+- **Watched folders** — add or remove folders. Removing one also deletes its
+  files from the index.
+- **Indexing** — turn video frames or speech transcription off, and set how long
+  a video may be before speech is skipped (default 60 minutes).
+- **Search hotkey** — click the field, press a combination; Windows checks that
+  it is free before saving it.
+- **Start with Windows** — a per-user setting, no administrator needed.
+- **Index** — how many files, videos and frames are indexed, the database size,
+  and **Rebuild index** (deletes the index and scans everything again).
+
+The tray menu also pauses indexing, opens the data folder and quits the app.
+
+## Using it
 
 | Key | Action |
 | --- | --- |
+| `Ctrl+Alt+Space` | Open the search window (configurable) |
 | Arrows | Move between results |
 | `Enter` | Preview the selected file |
 | `Ctrl+Enter` | Show the file in Explorer |
 | `Ctrl+C` | Copy the image to the clipboard |
+| `Space` | Play or pause a video |
 | `Esc` | Close the window |
 
-Typing is debounced by 250 ms and searches run off the UI thread, so a slow query never blocks the window. An empty query lists recent files; a query with no hits explains what was searched instead of showing a blank panel.
+An empty query lists recent files. Videos open at the matched moment; if
+Windows cannot decode the codec, ShotFinder shows the matched frame and an
+"Open externally" button instead of a black rectangle.
 
-Results come in two groups. **Matches** are text hits and text-plus-visual hits ordered by reciprocal rank fusion. A filename is text too, so `pulizia disco` finds `Pulizia disco 2026-09-25.mp4` even when nothing inside it matches. A spoken line is text as well: its tile carries a `SPOKEN` badge, shows the transcript with the query highlighted and the line's timestamp, and the preview starts two seconds before it. **Related by appearance** holds visual-only hits above the garbage floor, ordered by cosine and capped at 8; the header says "approximate" because it is. A video tile shows the best-matching frame and a timestamp badge such as `02:14`; the preview starts two seconds before that moment.
-
-In the video preview, `Space` plays or pauses and the left/right arrows jump five seconds. If Windows cannot decode the codec, the window shows the matched still frame and an "Open externally" button instead of a black rectangle. When VLC is the default player, opening externally forwards the start time.
-
-![Empty state](docs/screenshots/empty-state.png)
-
-![Results](docs/screenshots/results.png)
-
-![Preview](docs/screenshots/preview.png)
-
-## Use from the command line
-
-```powershell
-# Scan the watched folders and index new or changed files
-python -m shotfinder.cli index
-
-# Search by text in a screenshot, or by what an image shows
-python -m shotfinder.cli search "fattura enel"
-python -m shotfinder.cli search "spiaggia al tramonto"
-python -m shotfinder.cli search "spiaggia al tramonto" --explain
-
-# Most recent indexed files
-python -m shotfinder.cli search
-```
-
-The first run watches the folders that exist among the Windows Pictures, Screenshots, Videos and Downloads known folders, so OneDrive redirection and localised folder names are handled. To change them, edit `watched_folders` in `%LOCALAPPDATA%\ShotFinder\config.json` and run `index` again. `--data-dir` points the CLI at a different data directory.
-
-Files that exist only in the cloud are never downloaded or read: they are marked `skipped` with the reason `cloud-only` and picked up on a later scan once they are on disk.
-
-## How video indexing works
-
-Each video is sampled on a grid of `max(5 s, duration / 300)`, measured from the ffmpeg probe before decoding. Short videos keep one frame every five seconds; a two-hour video is sampled every 24 seconds so its end is still covered instead of being cut off at the frame cap. Frames are scaled on the ffmpeg side (bundled through `imageio-ffmpeg`, no system install), so a full-resolution frame is never held in memory. A frame is kept only when its perceptual hash differs from the last kept frame; a static screen recording therefore stores a handful of vectors instead of one per sample, and every video keeps at least its first frame. The 300-frame limit remains as a safety net.
-
-Sampling is resumable. The worker processes at most 30 frames per turn (`video_frames_per_turn`), writes the vectors and the resume cursor in one transaction, then puts the video back in the queue. A long video is indexed in the background without blocking images, and interrupting the app never double-embeds a frame. Videos indexed before this change whose sampling stopped early are detected on the next start and re-sampled; only their frame vectors are reset, so existing speech text survives.
-
-### Speech
-
-After a video's frames are done, and only when no images or frames are waiting, the worker extracts its audio with the bundled ffmpeg to a temporary 16 kHz mono WAV inside the data folder and transcribes it with Whisper `base` (CTranslate2, int8, CPU). The WAV is deleted in `finally`, including after a failure. The model is loaded from the local `models\whisper-base` directory only: `HF_HUB_OFFLINE=1` is set for the process, so a missing file is an error, never a silent download.
-
-Videos without an audio stream, and videos longer than `speech_max_minutes` (default 60), are marked `skipped` with the reason and never queued. Each segment is stored in `text_fts` with `source='speech'` and its start time. Transcription is not resumable per segment: an interrupted run restarts that video from the beginning, and a failed run stays retryable on the next start.
+![Search window](docs/screenshots/results.png)
 
 ## Known limitations
 
-- **Visual search is approximate.** On the calibration corpus, noise queries reach cosine 0.2503 while real hits fall to 0.2133, so the model cannot separate them with a single cutoff. Visual-only results are therefore shown in a separate, capped "Related by appearance" group rather than as confident matches. See `docs/threshold-calibration.md`. The planned fix is a stronger image/text model (SigLIP 2).
-- **Video audio is transcribed only up to 60 minutes per video** (`speech_max_minutes`). Longer videos remain searchable by their frames; raise the limit in `config.json` if needed.
-- **Speech accuracy depends on the recording.** Whisper `base` is chosen for speed; strong accents, overlapping speakers and music can produce approximate words. Transcription runs in the detected language and is not translated.
-- **In-app video playback depends on Windows codecs.** Common H.264 MP4 and most WebM files play; exotic codecs fall back to the matched still frame and an external player.
-- **OCR is Windows-only** (`Windows.Media.Ocr`), and the index covers the watched folders you configure, not the whole disk.
-- **The first visual query is slow** while the ONNX runtime and models load; later queries reuse them.
+- **Windows only.** The OCR engine and the tray integration are Windows APIs.
+- **One 635 MB download on first run.** It is resumable and verified against
+  pinned checksums; without it, text and OCR search still work.
+- **Visual search is approximate.** The current CLIP model cannot reliably
+  separate a weak real match from noise, so visual-only hits are shown in a
+  capped "Related by appearance" group, never as confident matches. A stronger
+  model is planned (see [roadmap](#roadmap)).
+- **Speech is not perfect.** Whisper `base` is fast but makes word errors,
+  especially with accents, music and overlapping speakers. It transcribes, it
+  does not translate.
+- **Speech is skipped on videos longer than 60 minutes.** Their frames are
+  still indexed; raise the limit in Settings if you need the audio.
+- **The executable is unsigned.** SmartScreen shows "More info → Run anyway"
+  the first time. Building from source avoids that dialog.
+- **Video playback depends on Windows codecs.** Common MP4/WebM files play;
+  exotic formats fall back to the matched still frame.
+- **The first visual query is slow** while the model loads; later ones reuse it.
 
-## Privacy
+## Build from source
 
-Indexing and search are entirely local. The database, models, logs and thumbnail cache live under `%LOCALAPPDATA%\ShotFinder`; the only network access is the one-time model download. No telemetry, no accounts, no uploads.
+Requirements: Python 3.11 or newer, 64-bit, and the
+[Microsoft Visual C++ runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+(already present on most PCs).
+
+```powershell
+git clone https://github.com/brighinatommaso-eng/shotfinder.git
+cd shotfinder
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .[dev,build]
+
+# run from source
+.\.venv\Scripts\python.exe -m shotfinder
+
+# tests
+.\.venv\Scripts\python.exe -m pytest -q
+
+# build the release zip (dist\ShotFinder-0.1.0-win64.zip)
+powershell -ExecutionPolicy Bypass -File tools\build.ps1
+```
+
+The build uses the committed `shotfinder.spec` (PyInstaller, one folder,
+windowed, app icon and version resource) and prints the zip size, the unpacked
+size and the SHA-256. Models are never bundled: the app downloads them to
+`%LOCALAPPDATA%\ShotFinder\models` on first run.
+
+A clean-machine check in Windows Sandbox is described in
+[docs/clean-test.md](docs/clean-test.md).
+
+### How it works
+
+- **Text** — Windows OCR (`Windows.Media.Ocr`) on images and video frames.
+- **Appearance** — a CLIP image encoder (ONNX) embeds every image and every
+  kept video frame; the text encoder embeds the query into the same space.
+- **Speech** — faster-whisper (`base`, int8, CPU) transcribes videos after their
+  frames are done, with the bundled ffmpeg decoding the audio.
+- **Storage** — one SQLite file with FTS5 for text and `sqlite-vec` for vectors.
+- **Video frames** — sampled every `max(5 s, duration / 300)`, near-duplicates
+  dropped, resumable, with a timestamp for every hit.
+
+### Command line
+
+```powershell
+python -m shotfinder.cli index                      # scan and index now
+python -m shotfinder.cli search "fattura enel"      # search the index
+python -m shotfinder.cli search --explain           # show ranking evidence
+python -m shotfinder.cli models status              # what is downloaded
+python -m shotfinder.cli models download            # fetch the models
+```
+
+## Roadmap
+
+- **SigLIP 2** for visual search, so approximate hits can become confident
+  matches.
+- **macOS** support (Apple Vision for OCR, a native tray app).
+- Optional: local translation of spoken lines.
 
 ## Built for Hack Club Stardance
 
@@ -124,4 +188,6 @@ Built for [Hack Club Stardance](https://stardance.hackclub.com).
 
 ## License
 
-MIT. The model files are distributed separately on the `models-v1` and `models-v2` releases; their upstream licenses are listed there. Whisper `base` comes from `Systran/faster-whisper-base` (MIT).
+MIT. The model files are distributed separately on the `models-v1` and
+`models-v2` releases; their upstream licenses are listed there. Whisper `base`
+comes from [`Systran/faster-whisper-base`](https://huggingface.co/Systran/faster-whisper-base) (MIT).

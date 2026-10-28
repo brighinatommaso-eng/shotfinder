@@ -142,6 +142,20 @@ def test_cloud_only_indexing_is_off_by_default_and_roundtrips(tmp_path: Path) ->
     assert Config.load(tmp_path).index_cloud_only_files is True
 
 
+def test_video_stages_are_on_by_default_and_roundtrip(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    assert config.index_video_frames is True
+    assert config.index_speech is True
+
+    config.index_video_frames = False
+    config.index_speech = False
+    config.save()
+
+    loaded = Config.load(tmp_path)
+    assert loaded.index_video_frames is False
+    assert loaded.index_speech is False
+
+
 
 def test_defaults_follow_the_windows_known_folder_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
