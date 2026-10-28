@@ -212,6 +212,8 @@ class Config:
     min_visual_similarity: float = 0.20
     max_visual_results: int = 8
     video_frames_per_turn: int = 30
+    # Videos longer than this are not transcribed; frames still index them.
+    speech_max_minutes: int = 60
     index_cloud_only_files: bool = False
     exclude_dir_names: set[str] = field(
         default_factory=lambda: set(DEFAULT_EXCLUDED_DIR_NAMES)
@@ -285,6 +287,7 @@ class Config:
             "min_visual_similarity": self.min_visual_similarity,
             "max_visual_results": self.max_visual_results,
             "video_frames_per_turn": self.video_frames_per_turn,
+            "speech_max_minutes": self.speech_max_minutes,
             "index_cloud_only_files": self.index_cloud_only_files,
             "exclude_dir_names": sorted(self.exclude_dir_names),
         }
@@ -347,7 +350,7 @@ class Config:
             # can only have come from the user.
             config.hotkey_is_custom = True
 
-        for name in ("ocr_max_dimension", "max_retries"):
+        for name in ("ocr_max_dimension", "max_retries", "speech_max_minutes"):
             value = raw.get(name)
             if isinstance(value, int) and value >= 0:
                 setattr(config, name, value)

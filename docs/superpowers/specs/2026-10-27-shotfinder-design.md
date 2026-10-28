@@ -120,7 +120,7 @@ CREATE TABLE files (
 
 -- text from OCR and speech; ts = NULL for images, seconds for video
 CREATE VIRTUAL TABLE text_fts USING fts5(
-  content, file_id UNINDEXED, ts UNINDEXED, source UNINDEXED,   -- source: 'ocr' | 'speech'
+  content, file_id UNINDEXED, ts UNINDEXED, source UNINDEXED,   -- source: 'ocr' | 'speech' | 'name'
   tokenize = 'unicode61 remove_diacritics 2'
 );
 
@@ -144,10 +144,12 @@ CREATE VIRTUAL TABLE vec_items USING vec0(embedding float[512]);
   RGB, shortest side 224 px with bicubic resize, center crop 224×224, scaled to
   `[0,1]` with the CLIP mean/std; vectors are L2-normalized (512 floats). Queries
   use the same tokenizer with `max_length=128`, truncation and padding.
-- **Video frames:** sample 1 frame every 5 s with ffmpeg; compute a cheap
+- **Video frames:** probe duration first, then sample every
+  `max(5 s, duration / 300)` so the whole file is covered; compute a cheap
   perceptual hash (e.g. `imagehash.phash` on 64px) and drop frames whose hash
-  distance to the last kept frame is < 6. Embed kept frames. Cap at 300 kept frames
-  per video.
+  distance to the last kept frame is < 6. Embed kept frames. Keep 300 kept
+  frames as a safety cap, and record actual coverage per video so a truncated
+  legacy index can be re-sampled.
 - **Speech:** extract 16 kHz mono WAV with ffmpeg to a temp file, run
   faster-whisper `base` int8 with VAD filter on, language auto-detect. Store each
   segment as an FTS row with `ts = start`. Skip videos with no audio stream.
@@ -157,7 +159,7 @@ CREATE VIRTUAL TABLE vec_items USING vec0(embedding float[512]);
   `onnx_threads` (default `min(4, cpu_count // 2)`), `inter_op_num_threads = 1`,
   `ORT_SEQUENTIAL` and `session.intra_op.allow_spinning = 0` so an idle indexer
   does not spin cores. `vision_batch_size` defaults to 1; the batching path stays
-  available for benchmarking. Whisper gets its own thread cap when Phase 4 lands.
+  available for benchmarking. Whisper reuses `onnx_threads`.
   Tray menu can pause/resume.
 
 ### 5.4 Search
@@ -191,7 +193,8 @@ Queries run on a separate thread; UI debounces input by 250 ms.
    redirection and localised names work); user can add/remove.
 2. Model download with progress bar into `%LOCALAPPDATA%\ShotFinder\models`
    (CLIP image fp32 351.6 MB + multilingual text int8 135.5 MB + tokenizer
-   2.9 MB ≈ 467 MB now; whisper `base` int8 adds ~75 MB in Phase 4). Indexing
+   2.9 MB + faster-whisper base 145.2 MB ≈ 635 MB; CLIP in `models-v1`,
+   Whisper in `models-v2`). Indexing
    images with OCR can start before vision/speech models finish downloading;
    finished images are backfilled with embeddings on the next start.
 3. Initial full scan, then live watching.

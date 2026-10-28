@@ -90,6 +90,7 @@ def _finalise(entry: dict[str, Any]) -> dict[str, Any]:
     text = bool(result.pop("_text"))
     visual = bool(result.pop("_visual"))
     result.pop("_best_rank", None)
+    result.pop("_timed_rank", None)
     if text and visual:
         result["match_type"] = MATCH_BOTH
     elif text:
@@ -128,6 +129,7 @@ def combine(
                 "mtime": None,
                 "ts": None,
                 "snippet": "",
+                "source": None,
                 "score": 0.0,
                 "match_type": MATCH_TEXT,
                 "fts_rank": None,
@@ -135,6 +137,7 @@ def combine(
                 "_text": False,
                 "_visual": False,
                 "_best_rank": None,
+                "_timed_rank": None,
             },
         )
 
@@ -146,12 +149,23 @@ def combine(
         entry["mtime"] = row.get("mtime", entry["mtime"])
         entry["score"] += 1.0 / (k + rank)
         entry["_text"] = True
-        if entry["fts_rank"] is None or rank < entry["fts_rank"]:
+        best = entry["fts_rank"] is None or rank < entry["fts_rank"]
+        if best:
             entry["fts_rank"] = rank
+        if row.get("ts") is not None and (
+            entry["_timed_rank"] is None or rank < entry["_timed_rank"]
+        ):
+            # A spoken line is a better jump point and snippet than the
+            # filename row, even when the name matches more strongly.
+            entry["_timed_rank"] = rank
+            entry["ts"] = row.get("ts")
             entry["snippet"] = row.get("snippet") or ""
+            entry["source"] = row.get("source")
+        elif best and entry["_timed_rank"] is None:
+            entry["snippet"] = row.get("snippet") or ""
+            entry["source"] = row.get("source")
         if entry["_best_rank"] is None or rank < entry["_best_rank"]:
             entry["_best_rank"] = rank
-            entry["ts"] = row.get("ts")
 
     for rank, row in enumerate(_first_per_file(vector_rows), start=1):
         entry = group(int(row["file_id"]))
@@ -164,9 +178,12 @@ def combine(
         cosine = distance_to_cosine(float(row["distance"]))
         if entry["cosine"] is None or cosine > entry["cosine"]:
             entry["cosine"] = cosine
+        if entry["_timed_rank"] is None and (
+            entry["_best_rank"] is None or rank < entry["_best_rank"]
+        ):
+            entry["ts"] = row.get("ts")
         if entry["_best_rank"] is None or rank < entry["_best_rank"]:
             entry["_best_rank"] = rank
-            entry["ts"] = row.get("ts")
 
     matches: list[dict[str, Any]] = []
     related: list[dict[str, Any]] = []

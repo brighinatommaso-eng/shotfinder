@@ -50,7 +50,35 @@ CREATE TABLE IF NOT EXISTS video_progress (
   kept INTEGER NOT NULL,
   last_hash TEXT
 );
+
+-- how much of each video was sampled, plus its speech stage state
+CREATE TABLE IF NOT EXISTS video_coverage (
+  file_id INTEGER PRIMARY KEY,
+  duration REAL,
+  interval REAL NOT NULL DEFAULT 5,
+  sampled INTEGER NOT NULL DEFAULT 0,
+  kept INTEGER NOT NULL DEFAULT 0,
+  last_ts REAL,
+  complete INTEGER NOT NULL DEFAULT 0,
+  has_audio INTEGER,
+  speech TEXT,
+  speech_reason TEXT,
+  speech_segments INTEGER NOT NULL DEFAULT 0
+);
 """
+
+_COVERAGE_COLUMNS = (
+    "duration",
+    "interval",
+    "sampled",
+    "kept",
+    "last_ts",
+    "complete",
+    "has_audio",
+    "speech",
+    "speech_reason",
+    "speech_segments",
+)
 
 _HASH_CHUNK = 1024 * 1024
 _VECTOR_DIMENSIONS = 512
@@ -79,8 +107,54 @@ def _fts_query(query: str) -> str:
     return " AND ".join(f'"{token}"*' for token in tokens)
 
 
+# Date/time runs are removed before splitting so "2026-09-25" is one token, not
+# three meaningless numbers. Ordered longest-pattern first.
+_NAME_DROP_RE = re.compile(
+    r"\b\d{4}[-_.]\d{1,2}[-_.]\d{1,2}\b"  # 2026-09-25
+    r"|\b\d{1,2}[-_.]\d{1,2}[-_.]\d{2,4}\b"  # 21-19-47
+    r"|\b\d{8}\b"  # 20260925
+    r"|\b\d{6}\b"  # 211947
+)
+_NAME_SPLIT_RE = re.compile(r"[_\-. ]+")
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NAME_NOISE = frozenset({"img", "dsc", "vid", "screenshot", "image", "photo"})
+
+
+def name_tokens(path: str | Path) -> list[str]:
+    """Split a file stem into searchable words, dropping camera noise.
+
+    ``Pulizia disco 2026-09-25 21-19-47.mp4`` becomes ``["pulizia", "disco"]``;
+    ``ScreenRecording_2024`` becomes ``["screen", "recording"]``.
+    """
+    stem = Path(path).stem
+    stem = _NAME_DROP_RE.sub(" ", stem)
+    tokens: list[str] = []
+    for chunk in _NAME_SPLIT_RE.split(stem):
+        for part in _CAMEL_RE.split(chunk):
+            word = part.strip().lower()
+            if not word or word in _NAME_NOISE or word.isdigit():
+                continue
+            tokens.append(word)
+    return tokens
+
+
 def _as_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _replace_name_row(
+    connection: sqlite3.Connection, file_id: int, path: str | Path
+) -> None:
+    """Store the filename words as one FTS row with ``source = 'name'``."""
+    connection.execute(
+        "DELETE FROM text_fts WHERE file_id = ? AND source = 'name'", (file_id,)
+    )
+    tokens = name_tokens(path)
+    if tokens:
+        connection.execute(
+            "INSERT INTO text_fts (content, file_id, ts, source) VALUES (?, ?, NULL, 'name')",
+            (" ".join(tokens), file_id),
+        )
 
 
 def _prepare_vectors(
@@ -214,6 +288,7 @@ class Index:
                         existing["id"],
                     ),
                 )
+                _replace_name_row(connection, int(existing["id"]), path)
                 return int(existing["id"]), True
 
             digest = compute_file_hash(path)
@@ -235,6 +310,7 @@ class Index:
                         moved["id"],
                     ),
                 )
+                _replace_name_row(connection, int(moved["id"]), path)
                 return int(moved["id"]), False
 
             cursor = connection.execute(
@@ -252,7 +328,9 @@ class Index:
                     stat.st_ctime,
                 ),
             )
-            return int(cursor.lastrowid), True
+            file_id = int(cursor.lastrowid)
+            _replace_name_row(connection, file_id, path)
+            return file_id, True
 
     def mark_cloud_only(self, path: str | Path, kind: str) -> int:
         """Record a cloud placeholder without opening or hashing it.
@@ -353,6 +431,7 @@ class Index:
     def _delete_content(self, connection: sqlite3.Connection, file_id: int) -> None:
         connection.execute("DELETE FROM text_fts WHERE file_id = ?", (file_id,))
         connection.execute("DELETE FROM video_progress WHERE file_id = ?", (file_id,))
+        connection.execute("DELETE FROM video_coverage WHERE file_id = ?", (file_id,))
         self._delete_vectors(connection, file_id)
 
     def _delete_vectors(
@@ -406,6 +485,35 @@ class Index:
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def next_speech_pending(self, max_seconds: int, limit: int = 100) -> list[int]:
+        """Videos whose frames are done and whose speech has not run yet.
+
+        Videos without audio and videos longer than *max_seconds* are excluded
+        here as well as in the worker, so a recovery pass never queues work that
+        would immediately be skipped. ``max_seconds <= 0`` disables the cap.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT f.id FROM files f
+              LEFT JOIN video_coverage c ON c.file_id = f.id
+             WHERE f.kind = 'video'
+               AND f.status = 'done'
+               AND (
+                 c.file_id IS NULL
+                 OR (
+                   c.complete = 1
+                   AND c.speech IS NULL
+                   AND (c.has_audio IS NULL OR c.has_audio = 1)
+                   AND (? <= 0 OR c.duration IS NULL OR c.duration <= ?)
+                 )
+               )
+             ORDER BY f.id
+             LIMIT ?
+            """,
+            (max_seconds, max_seconds, limit),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
 
     def reset_skipped_videos(self, reason_prefix: str) -> list[int]:
         """Queue videos that were skipped for *reason_prefix*; return their ids.
@@ -465,6 +573,18 @@ class Index:
             if text:
                 normalised.append((text, file_id, timestamp, source))
         if not normalised:
+            with self.conn as connection:
+                if expected_hash is not None:
+                    unchanged = connection.execute(
+                        "SELECT 1 FROM files WHERE id = ? AND hash = ?",
+                        (file_id, expected_hash),
+                    ).fetchone()
+                    if unchanged is None:
+                        return 0
+                connection.execute(
+                    "DELETE FROM text_fts WHERE file_id = ? AND source = ?",
+                    (file_id, source),
+                )
             return 0
         with self.conn as connection:
             if expected_hash is not None:
@@ -559,13 +679,14 @@ class Index:
         kept: int,
         last_hash: str | None,
         expected_hash: str | None = None,
+        coverage: dict[str, Any] | None = None,
     ) -> bool:
         """Append one turn of video vectors and its resume cursor atomically.
 
-        Vectors and :class:`video_progress` are written in one transaction, so
-        an interrupted turn either keeps both or neither: a resumed video never
-        embeds the same frame twice. Returns ``False`` when the file changed
-        while ffmpeg was running.
+        Vectors, :class:`video_progress` and (when given) the coverage row are
+        written in one transaction, so an interrupted turn either keeps all of
+        them or none: a resumed video never embeds the same frame twice. Returns
+        ``False`` when the file changed while ffmpeg was running.
         """
         prepared = _prepare_vectors(items)
         with self.conn as connection:
@@ -589,7 +710,178 @@ class Index:
                 """,
                 (file_id, float(next_ts), int(kept), last_hash),
             )
+            if coverage is not None:
+                self._upsert_coverage(connection, file_id, coverage)
         return True
+
+    def _upsert_coverage(
+        self,
+        connection: sqlite3.Connection,
+        file_id: int,
+        values: dict[str, Any],
+    ) -> None:
+        columns = [name for name in _COVERAGE_COLUMNS if name in values]
+        if not columns:
+            return
+        connection.execute(
+            "INSERT OR IGNORE INTO video_coverage (file_id) VALUES (?)", (file_id,)
+        )
+        assignments = ", ".join(f"{name} = ?" for name in columns)
+        parameters = [values[name] for name in columns]
+        parameters.append(file_id)
+        connection.execute(
+            f"UPDATE video_coverage SET {assignments} WHERE file_id = ?",
+            parameters,
+        )
+
+    def video_coverage(self, file_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM video_coverage WHERE file_id = ?", (file_id,)
+        ).fetchone()
+        return _as_dict(row)
+
+    def record_probe(
+        self,
+        file_id: int,
+        *,
+        duration: float | None,
+        has_audio: bool,
+        complete: int = 1,
+        expected_hash: str | None = None,
+    ) -> bool:
+        """Store ffmpeg's probe for a video indexed before coverage existed."""
+        with self.conn as connection:
+            if expected_hash is not None:
+                unchanged = connection.execute(
+                    "SELECT 1 FROM files WHERE id = ? AND hash = ?",
+                    (file_id, expected_hash),
+                ).fetchone()
+                if unchanged is None:
+                    return False
+            self._upsert_coverage(
+                connection,
+                file_id,
+                {
+                    "duration": duration,
+                    "interval": 5.0,
+                    "complete": int(complete),
+                    "has_audio": int(has_audio),
+                },
+            )
+        return True
+
+    def set_speech_state(
+        self,
+        file_id: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        segments: int = 0,
+        expected_hash: str | None = None,
+    ) -> bool:
+        """Record that a video's speech stage is done or skipped."""
+        with self.conn as connection:
+            if expected_hash is not None:
+                unchanged = connection.execute(
+                    "SELECT 1 FROM files WHERE id = ? AND hash = ?",
+                    (file_id, expected_hash),
+                ).fetchone()
+                if unchanged is None:
+                    return False
+            self._upsert_coverage(
+                connection,
+                file_id,
+                {
+                    "speech": status,
+                    "speech_reason": reason,
+                    "speech_segments": int(segments),
+                },
+            )
+        return True
+
+    def reset_truncated_videos(self) -> list[int]:
+        """Queue videos whose frame sampling stopped before the end.
+
+        New rows say so in ``video_coverage.complete``. Videos indexed before
+        coverage was recorded were capped at 300 kept frames, so exactly that
+        many vectors means the tail was never sampled. Only the frames stage is
+        reset: OCR text, speech rows and a finished speech stage survive.
+        """
+        with self.conn as connection:
+            rows = connection.execute(
+                """
+                SELECT f.id FROM files f
+                 WHERE f.kind = 'video' AND f.status = 'done'
+                   AND (
+                     EXISTS (SELECT 1 FROM video_coverage c
+                              WHERE c.file_id = f.id AND c.complete = 0)
+                     OR (
+                       NOT EXISTS (SELECT 1 FROM video_coverage c
+                                    WHERE c.file_id = f.id)
+                       AND (SELECT COUNT(*) FROM vec_meta m
+                             WHERE m.file_id = f.id) >= 300
+                     )
+                   )
+                 ORDER BY f.id
+                """
+            ).fetchall()
+            for row in rows:
+                file_id = int(row["id"])
+                self._delete_vectors(connection, file_id)
+                connection.execute(
+                    "DELETE FROM video_progress WHERE file_id = ?", (file_id,)
+                )
+                connection.execute(
+                    """
+                    UPDATE video_coverage
+                       SET duration = NULL, interval = 5, sampled = 0, kept = 0,
+                           last_ts = NULL, complete = 0
+                     WHERE file_id = ?
+                    """,
+                    (file_id,),
+                )
+                existing = connection.execute(
+                    "SELECT stages_done FROM files WHERE id = ?", (file_id,)
+                ).fetchone()
+                stages = {
+                    stage
+                    for stage in (existing["stages_done"] or "").split(",")
+                    if stage and stage != "frames"
+                }
+                connection.execute(
+                    """
+                    UPDATE files
+                       SET status = 'pending', error = NULL, stages_done = ?
+                     WHERE id = ?
+                    """,
+                    (",".join(sorted(stages)), file_id),
+                )
+        return [int(row["id"]) for row in rows]
+
+    def backfill_names(self) -> int:
+        """Insert the filename row for files indexed before names were searchable."""
+        rows = self.conn.execute(
+            "SELECT id, path FROM files ORDER BY id"
+        ).fetchall()
+        named = {
+            int(row[0])
+            for row in self.conn.execute(
+                "SELECT DISTINCT file_id FROM text_fts WHERE source = 'name'"
+            )
+        }
+        pending: list[tuple[int, str]] = []
+        for row in rows:
+            file_id = int(row["id"])
+            # Files whose name has no usable words (DSC_0042.jpg) never get a
+            # row, so skip them instead of retrying on every start.
+            if file_id not in named and name_tokens(row["path"]):
+                pending.append((file_id, row["path"]))
+        if not pending:
+            return 0
+        with self.conn as connection:
+            for file_id, path in pending:
+                _replace_name_row(connection, file_id, path)
+        return len(pending)
 
     def _insert_vector(
         self,

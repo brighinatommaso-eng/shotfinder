@@ -94,6 +94,13 @@ def test_frames_accumulate_one_turn_at_a_time(video_setup) -> None:
     assert _timestamps(index, file_id) == [0.0, 5.0, 10.0]
     assert indexer.stats["processed"] == 1
 
+    coverage = index.video_coverage(file_id)
+    assert coverage is not None
+    assert coverage["complete"] == 1
+    assert coverage["sampled"] == 3
+    assert coverage["kept"] == 3
+    assert coverage["last_ts"] == 10.0
+
 
 def test_progress_survives_a_restart(video_setup) -> None:
     indexer, index, file_id = video_setup

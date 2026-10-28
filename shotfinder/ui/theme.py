@@ -37,6 +37,8 @@ class Palette:
     badge_both_bg: str
     badge_recent: str
     badge_recent_bg: str
+    badge_spoken: str
+    badge_spoken_bg: str
     scroll: str
     scroll_hover: str
     shadow: QColor
@@ -64,6 +66,8 @@ DARK = Palette(
     badge_both_bg="rgba(127, 227, 192, 30)",
     badge_recent="#B9B9B9",
     badge_recent_bg="rgba(255, 255, 255, 20)",
+    badge_spoken="#FFD27F",
+    badge_spoken_bg="rgba(255, 210, 127, 28)",
     scroll="rgba(255, 255, 255, 56)",
     scroll_hover="rgba(255, 255, 255, 96)",
     shadow=QColor(0, 0, 0, 110),
@@ -91,6 +95,8 @@ LIGHT = Palette(
     badge_both_bg="rgba(11, 107, 79, 16)",
     badge_recent="#5C5C5C",
     badge_recent_bg="rgba(0, 0, 0, 14)",
+    badge_spoken="#7A5200",
+    badge_spoken_bg="rgba(122, 82, 0, 16)",
     scroll="rgba(0, 0, 0, 44)",
     scroll_hover="rgba(0, 0, 0, 80)",
     shadow=QColor(0, 0, 0, 60),
@@ -161,6 +167,7 @@ ResultTile[selected="true"] {
 #Badge[kind="visual"] { color: %(badge_visual)s; background: %(badge_visual_bg)s; }
 #Badge[kind="both"] { color: %(badge_both)s; background: %(badge_both_bg)s; }
 #Badge[kind="recent"] { color: %(badge_recent)s; background: %(badge_recent_bg)s; }
+#Badge[kind="spoken"] { color: %(badge_spoken)s; background: %(badge_spoken_bg)s; }
 #Status { color: %(faint)s; font-size: 10px; }
 #EmptyTitle { color: %(text)s; font-size: 17px; font-weight: 600; }
 #EmptyBody { color: %(muted)s; font-size: 12px; }

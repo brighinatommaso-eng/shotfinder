@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
@@ -24,7 +25,7 @@ class IndexerReporter(QObject):
 
     progress = Signal(dict)
 
-    def report(self, stats: dict[str, int]) -> None:
+    def report(self, stats: dict[str, Any]) -> None:
         self.progress.emit(dict(stats))
 
 
@@ -39,7 +40,7 @@ class TrayIcon(QObject):
 
     def __init__(self, indexer: Indexer, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._stats: dict[str, int] = {}
+        self._stats: dict[str, Any] = {}
         self._paused = indexer.paused
         self._models_missing = False
         self._download_text: str | None = None
@@ -85,7 +86,7 @@ class TrayIcon(QObject):
 
     # -- state ---------------------------------------------------------------
 
-    def set_stats(self, stats: dict[str, int]) -> None:
+    def set_stats(self, stats: dict[str, Any]) -> None:
         self._stats = stats
         self._refresh()
 
@@ -111,6 +112,12 @@ class TrayIcon(QObject):
         """The short state shown in the tooltip."""
         if self._download_text:
             return self._download_text
+        activity = str(self._stats.get("activity") or "")
+        if activity:
+            percent = self._stats.get("activity_percent")
+            if percent is None:
+                return activity
+            return f"{activity} ({int(percent)}%)"
         if self._paused:
             return "Paused"
         outstanding = int(self._stats.get("outstanding", 0))

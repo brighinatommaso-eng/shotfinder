@@ -54,7 +54,13 @@ from ..search import (
     search,
 )
 from . import icons
-from .formatting import clean_snippet, folder_label, format_date, format_timestamp
+from .formatting import (
+    clean_snippet,
+    folder_label,
+    format_date,
+    format_timestamp,
+    highlight_snippet,
+)
 from .preview import PreviewWindow
 from .search_session import SearchSession
 from .theme import Palette, is_dark, palette_for
@@ -240,6 +246,10 @@ class ResultTile(QFrame):
         self._badge = QLabel(self)
         self._badge.setObjectName("Badge")
         match_type = str(result.get("match_type") or "")
+        spoken = (
+            str(result.get("source") or "") == "speech"
+            and match_type in (MATCH_TEXT, MATCH_BOTH)
+        )
         badge_text = {
             MATCH_TEXT: "TEXT",
             MATCH_VISUAL: "VISUAL",
@@ -252,6 +262,8 @@ class ResultTile(QFrame):
             MATCH_BOTH: "both",
             MATCH_RECENT: "recent",
         }.get(match_type, "text")
+        if spoken:
+            badge_text, badge_kind = "SPOKEN", "spoken"
         self._badge.setText(badge_text)
         self._badge.setProperty("kind", badge_kind)
         meta.addWidget(self._badge)
@@ -268,13 +280,29 @@ class ResultTile(QFrame):
         self._snippet.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
+        snippet = result.get("snippet")
         if match_type == MATCH_RECENT:
-            text = folder_label(str(result.get("path", "")))
+            self._snippet.setText(folder_label(str(result.get("path", ""))))
         elif match_type in (MATCH_TEXT, MATCH_BOTH):
-            text = clean_snippet(result.get("snippet")) or "Text match"
+            if snippet:
+                rendered = highlight_snippet(snippet)
+                if spoken:
+                    stamp = format_timestamp(result.get("ts"))
+                    rendered = (
+                        f'<span style="color: {self._palette.muted};">'
+                        f"{stamp}</span> {rendered}"
+                    )
+                self._snippet.setTextFormat(Qt.TextFormat.RichText)
+                self._snippet.setText(rendered)
+            else:
+                self._snippet.setText("Text match")
         else:
-            text = "Matched by appearance"
-        self._snippet.setText(text)
+            self._snippet.setText("Matched by appearance")
+        if spoken:
+            self._snippet.setToolTip(
+                f"{clean_snippet(snippet)}"
+                f"\nSpoken at {format_timestamp(result.get('ts'))}"
+            )
         layout.addWidget(self._snippet)
 
         self._render_placeholder()

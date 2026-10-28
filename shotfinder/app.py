@@ -198,15 +198,26 @@ class ShotFinderApp:
     # -- models --------------------------------------------------------------
 
     def _check_models(self) -> None:
-        if models.models_ready(self.config.models_dir):
+        vision = models.models_ready(self.config.models_dir)
+        speech = models.speech_ready(self.config.models_dir)
+        if vision and speech:
             self.tray.set_models_missing(False)
             return
         self.tray.set_models_missing(True)
+        if not vision:
+            message = (
+                "Visual search needs the CLIP models and transcription needs "
+                "Whisper (about 640 MB). Click this notification or use the "
+                "tray menu to download them. Text search works meanwhile."
+            )
+        else:
+            message = (
+                "Speech search needs the Whisper model (about 140 MB). Click "
+                "this notification or use the tray menu to download it."
+            )
         self.tray.notify(
             "Models missing",
-            "Visual search needs the CLIP models (about 490 MB). "
-            "Click this notification or use the tray menu to download them. "
-            "Text search works meanwhile.",
+            message,
             action="download_models",
         )
 
@@ -234,11 +245,14 @@ class ShotFinderApp:
         self.tray.set_models_missing(False)
         self.tray.notify(
             "Models ready",
-            "Visual search is now on. Existing images will be embedded in the background.",
+            "Visual search and transcription are now on. Existing files will "
+            "be processed in the background.",
         )
         self.indexer.prepare_vision()
         queued = self.indexer.backfill_vision()
         log.info("Queued %d image(s) for vision backfill", queued)
+        speech = self.indexer.backfill_speech()
+        log.info("Queued %d video(s) for speech", speech)
 
     def _on_download_failed(self, error: str) -> None:
         self._download_task = None

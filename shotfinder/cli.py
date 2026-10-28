@@ -119,7 +119,11 @@ def _cmd_search(args: argparse.Namespace) -> int:
                 cosine = row.get("cosine")
                 rank_text = "-" if fts_rank is None else str(fts_rank)
                 cosine_text = "-" if cosine is None else f"{float(cosine):.4f}"
-                print(f"    fts_rank={rank_text} cosine={cosine_text}")
+                source_text = row.get("source") or "-"
+                print(
+                    f"    fts_rank={rank_text} cosine={cosine_text} "
+                    f"source={source_text}"
+                )
 
     if not query:
         print_rows(results.matches)
@@ -165,7 +169,8 @@ def _cmd_models_download(args: argparse.Namespace) -> int:
     for path in paths:
         print(f"  {path}")
     print(
-        "Models ready. Run `python -m shotfinder.cli index` to backfill visual embeddings."
+        "Models ready. Run `python -m shotfinder.cli index` to backfill visual "
+        "embeddings and transcribe videos."
     )
     return 0
 
@@ -174,8 +179,8 @@ def _cmd_models_status(args: argparse.Namespace) -> int:
     config = _config(args)
     print(f"Models directory: {config.models_dir}")
     ready = True
-    for model in models.MODELS:
-        path = config.models_dir / model.filename
+    for model in models.ALL_MODELS:
+        path = model.path_in(config.models_dir)
         if path.is_file():
             actual = path.stat().st_size
             if actual == model.size:
@@ -186,7 +191,7 @@ def _cmd_models_status(args: argparse.Namespace) -> int:
         else:
             state = "missing"
             ready = False
-        print(f"  {model.filename:26} {state}")
+        print(f"  {model.relative_path!s:44} {state}")
     if ready:
         print("All models present.")
     else:

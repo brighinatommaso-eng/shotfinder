@@ -58,14 +58,17 @@ def test_related_cap_and_video_turn_defaults_roundtrip(tmp_path: Path) -> None:
     config = Config(data_dir=tmp_path)
     assert config.max_visual_results == 8
     assert config.video_frames_per_turn == 30
+    assert config.speech_max_minutes == 60
 
     config.max_visual_results = 3
     config.video_frames_per_turn = 12
+    config.speech_max_minutes = 90
     config.save()
 
     loaded = Config.load(tmp_path)
     assert loaded.max_visual_results == 3
     assert loaded.video_frames_per_turn == 12
+    assert loaded.speech_max_minutes == 90
 
 
 def test_the_old_025_similarity_default_is_migrated(tmp_path: Path) -> None:

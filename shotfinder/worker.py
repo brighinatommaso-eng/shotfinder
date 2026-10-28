@@ -28,16 +28,23 @@ from .extractors.video import (
     FrameCursor,
     VideoUnavailableError,
     iter_frames,
+    probe_media,
+    sampling_interval,
 )
 from .index import Index
 
 log = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[dict[str, int]], None]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 VIDEO_NOT_IMPLEMENTED_REASON = "video indexing is not implemented yet (Phase 4)"
 VIDEO_MODELS_REASON = "vision models missing; install them to index videos"
 VIDEO_EMPTY_REASON = "no video frames could be decoded"
+SPEECH_NO_AUDIO_REASON = "no audio stream"
+SPEECH_TOO_LONG_REASON = "longer than speech_max_minutes"
+
+STAGE_MEDIA = "media"
+STAGE_SPEECH = "speech"
 
 
 def _priority(kind: str) -> int:
@@ -62,16 +69,20 @@ class Indexer:
         self.config = config
         self.index = index
         self._on_progress = on_progress
-        # (priority, sequence, file_id); the sequence keeps FIFO within a kind.
-        self._queue: queue.PriorityQueue[tuple[int, int, int]] = queue.PriorityQueue()
+        # (priority, sequence, file_id, stage); the sequence keeps FIFO within a
+        # kind and the priority keeps speech behind every image and video frame.
+        self._queue: queue.PriorityQueue[tuple[int, int, int, str]] = (
+            queue.PriorityQueue()
+        )
         self._sequence = 0
-        self._retries: list[tuple[float, int, int, int]] = []
+        self._retries: list[tuple[float, int, int, int, str]] = []
         self._attempts: dict[int, int] = {}
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._cond = threading.Condition()
         self._thread: threading.Thread | None = None
         self._outstanding = 0
+        self._activity: tuple[str, int | None] | None = None
         self._stats = {
             "enqueued": 0,
             "processed": 0,
@@ -81,6 +92,7 @@ class Indexer:
         }
         self._ocr_error: str | None = None
         self._vision_missing_logged = False
+        self._speech_missing_logged = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -90,9 +102,12 @@ class Indexer:
         self._stop.clear()
         self.purge_excluded()
         self._reset_unimplemented_videos()
+        self._reset_truncated_videos()
         self._load_vision_runtime()
+        self._backfill_names()
         self._recover_pending()
         self._recover_vision()
+        self._recover_speech()
         self._thread = threading.Thread(
             target=self._run, name="shotfinder-worker", daemon=True
         )
@@ -130,13 +145,16 @@ class Indexer:
             return True
 
     @property
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         with self._cond:
+            activity = self._activity
             return {
                 **self._stats,
                 "outstanding": self._outstanding,
                 "queued": self._queue.qsize(),
                 "retries": len(self._retries),
+                "activity": activity[0] if activity else "",
+                "activity_percent": activity[1] if activity else None,
             }
 
     def _notify_progress(self) -> None:
@@ -182,12 +200,28 @@ class Indexer:
     def _push(self, file_id: int, kind: str) -> None:
         with self._cond:
             self._outstanding += 1
-        self._queue.put((_priority(kind), self._next_sequence(), file_id))
+        self._queue.put(
+            (_priority(kind), self._next_sequence(), file_id, STAGE_MEDIA)
+        )
+        self._notify_progress()
+
+    def _push_speech(self, file_id: int) -> None:
+        """Queue a transcription behind every image and video frame."""
+        with self._cond:
+            self._outstanding += 1
+        self._queue.put((2, self._next_sequence(), file_id, STAGE_SPEECH))
         self._notify_progress()
 
     def _requeue(self, file_id: int, kind: str) -> None:
         """Put a partly processed video back without changing the outstanding count."""
-        self._queue.put((_priority(kind), self._next_sequence(), file_id))
+        self._queue.put(
+            (_priority(kind), self._next_sequence(), file_id, STAGE_MEDIA)
+        )
+        self._notify_progress()
+
+    def _set_activity(self, label: str | None, percent: int | None = None) -> None:
+        with self._cond:
+            self._activity = (label, percent) if label else None
         self._notify_progress()
 
     def _recover_pending(self) -> None:
@@ -204,6 +238,19 @@ class Indexer:
             self._push(file_id, "video")
         if file_ids:
             log.info("Queued %d video(s) previously skipped", len(file_ids))
+
+    def _reset_truncated_videos(self) -> None:
+        """Re-sample videos whose frames stopped before the end of the file."""
+        file_ids = self.index.reset_truncated_videos()
+        for file_id in file_ids:
+            self._push(file_id, "video")
+        if file_ids:
+            log.info("Queued %d video(s) with truncated frame coverage", len(file_ids))
+
+    def _backfill_names(self) -> None:
+        count = self.index.backfill_names()
+        if count:
+            log.info("Added searchable filenames for %d file(s)", count)
 
     def _load_vision_runtime(self) -> None:
         """Import onnxruntime from the main thread before any OCR runs.
@@ -230,6 +277,14 @@ class Indexer:
         if count:
             log.info("Queued %d image(s) for vision backfill", count)
 
+    def _recover_speech(self) -> None:
+        """Queue videos whose frames are done but speech has not run yet."""
+        if not models.speech_ready(self.config.models_dir):
+            return
+        count = self.backfill_speech()
+        if count:
+            log.info("Queued %d video(s) for speech", count)
+
     def backfill_vision(self) -> int:
         """Queue images without visual embeddings and videos skipped for models."""
         rows = self.index.next_vision_backfill(limit=-1)
@@ -239,6 +294,16 @@ class Indexer:
         for file_id in videos:
             self._push(file_id, "video")
         return len(rows) + len(videos)
+
+    def backfill_speech(self) -> int:
+        """Queue videos that finished frames while the speech model was missing."""
+        if not models.speech_ready(self.config.models_dir):
+            return 0
+        max_seconds = max(0, self.config.speech_max_minutes) * 60
+        rows = self.index.next_speech_pending(max_seconds, limit=-1)
+        for file_id in rows:
+            self._push_speech(file_id)
+        return len(rows)
 
     def prepare_vision(self) -> None:
         """Import the ONNX runtime from the calling (main) thread."""
@@ -279,7 +344,7 @@ class Indexer:
                 continue
             self._dispatch_due_retries()
             try:
-                _, _, file_id = self._queue.get(timeout=0.5)
+                _, _, file_id, stage = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if self._should_throttle():
@@ -293,11 +358,11 @@ class Indexer:
                     break
             requeue: str | None = None
             try:
-                requeue = self._process(file_id)
+                requeue = self._process(file_id, stage)
                 if requeue is None:
                     self._attempts.pop(file_id, None)
             except Exception as exc:
-                self._handle_failure(file_id, exc)
+                self._handle_failure(file_id, exc, stage)
             finally:
                 if requeue is not None and not self._stop.is_set():
                     self._requeue(file_id, requeue)
@@ -337,19 +402,23 @@ class Indexer:
     def _dispatch_due_retries(self) -> None:
         now = time.monotonic()
         while self._retries and self._retries[0][0] <= now:
-            _, _, file_id, priority = heapq.heappop(self._retries)
-            self._queue.put((priority, self._next_sequence(), file_id))
+            _, _, file_id, priority, stage = heapq.heappop(self._retries)
+            self._queue.put((priority, self._next_sequence(), file_id, stage))
 
-    def _handle_failure(self, file_id: int, exc: Exception) -> None:
+    def _handle_failure(
+        self, file_id: int, exc: Exception, stage: str = STAGE_MEDIA
+    ) -> None:
         attempt = self._attempts.get(file_id, 0) + 1
         self._attempts[file_id] = attempt
         if attempt <= self.config.max_retries:
             due = time.monotonic() + self.config.retry_delay_seconds
             row = self.index.get_file(file_id)
             priority = _priority(str(row["kind"])) if row is not None else 2
+            if stage == STAGE_SPEECH:
+                priority = 2
             heapq.heappush(
                 self._retries,
-                (due, self._next_sequence(), file_id, priority),
+                (due, self._next_sequence(), file_id, priority, stage),
             )
             with self._cond:
                 self._outstanding += 1
@@ -372,12 +441,14 @@ class Indexer:
             self._stats["failed"] += 1
         log.exception("Giving up on file %s", file_id)
 
-    def _process(self, file_id: int) -> str | None:
+    def _process(self, file_id: int, stage: str = STAGE_MEDIA) -> str | None:
         """Run one turn for *file_id*; return a kind when it must be requeued."""
         row = self.index.get_file(file_id)
         if row is None:
             return None
-        stages = {stage for stage in (row["stages_done"] or "").split(",") if stage}
+        if stage == STAGE_SPEECH:
+            return self._process_speech(row)
+        stages = {name for name in (row["stages_done"] or "").split(",") if name}
         kind = str(row["kind"])
         if row["status"] == "done":
             # Only an image waiting for its vision embedding is still work.
@@ -448,10 +519,26 @@ class Indexer:
                 kept=int(progress["kept"]),
                 last_hash=progress["last_hash"],
             )
+
+        coverage = self.index.video_coverage(file_id)
+        if coverage is not None and coverage["duration"] is not None:
+            duration = float(coverage["duration"])
+            interval = float(coverage["interval"])
+            has_audio = (
+                None if coverage["has_audio"] is None else bool(coverage["has_audio"])
+            )
+        else:
+            info = probe_media(path)
+            duration = info.duration
+            interval = sampling_interval(duration)
+            has_audio = info.has_audio
+
         budget = max(1, int(self.config.video_frames_per_turn))
         failure: str | None = None
         try:
-            frames = list(iter_frames(path, cursor, max_frames=budget))
+            frames = list(
+                iter_frames(path, cursor, interval=interval, max_frames=budget)
+            )
         except VideoUnavailableError as exc:
             frames = []
             failure = str(exc)
@@ -480,6 +567,18 @@ class Indexer:
         else:
             items = []
 
+        sampled = int(round(cursor.next_ts / interval)) if interval > 0 else 0
+        last_ts = cursor.next_ts - interval if sampled else None
+        reached_end = cursor.exhausted or (
+            duration is not None
+            and last_ts is not None
+            and last_ts >= duration - interval
+        )
+        complete = reached_end or cursor.kept >= MAX_KEPT_FRAMES
+        if failure is not None and cursor.kept:
+            # A decode error, not the frame budget: retrying the same bytes
+            # every start would never get further.
+            complete = True
         if not self.index.add_video_frames(
             file_id,
             items,
@@ -487,6 +586,15 @@ class Indexer:
             kept=cursor.kept,
             last_hash=cursor.last_hash,
             expected_hash=content_hash,
+            coverage={
+                "duration": duration,
+                "interval": interval,
+                "sampled": sampled,
+                "kept": cursor.kept,
+                "last_ts": last_ts,
+                "complete": int(complete),
+                "has_audio": None if has_audio is None else int(has_audio),
+            },
         ):
             # The file changed while ffmpeg was running; its queued refresh wins.
             return None
@@ -512,7 +620,7 @@ class Indexer:
                 self._count("skipped")
             return None
 
-        if cursor.kept >= MAX_KEPT_FRAMES or cursor.exhausted:
+        if cursor.exhausted or cursor.kept >= MAX_KEPT_FRAMES:
             if cursor.kept == 0:
                 self.index.clear_video_progress(file_id)
                 self.index.mark_status(
@@ -540,9 +648,156 @@ class Indexer:
         ):
             self.index.clear_video_progress(file_id)
             self._count("processed")
+            self._maybe_enqueue_speech(file_id, row)
         log.debug(
             "Video %s done: %d kept frame(s)", Path(row["path"]).name, cursor.kept
         )
+
+    def _maybe_enqueue_speech(self, file_id: int, row: dict[str, Any]) -> None:
+        """Queue transcription once frames are done, unless it cannot help."""
+        coverage = self.index.video_coverage(file_id)
+        if coverage is None or coverage["speech"] is not None:
+            return
+        content_hash = row["hash"]
+        has_audio = coverage["has_audio"]
+        if has_audio is not None and not int(has_audio):
+            self.index.set_speech_state(
+                file_id,
+                "skipped",
+                reason=SPEECH_NO_AUDIO_REASON,
+                expected_hash=content_hash,
+            )
+            return
+        duration = coverage["duration"]
+        max_seconds = max(0, int(self.config.speech_max_minutes)) * 60
+        if duration is not None and max_seconds and float(duration) > max_seconds:
+            self.index.set_speech_state(
+                file_id,
+                "skipped",
+                reason=SPEECH_TOO_LONG_REASON,
+                expected_hash=content_hash,
+            )
+            return
+        if not models.speech_ready(self.config.models_dir):
+            if not self._speech_missing_logged:
+                log.info(
+                    "Speech model not installed in %s; videos stay searchable by frames",
+                    self.config.models_dir,
+                )
+                self._speech_missing_logged = True
+            return
+        self._push_speech(file_id)
+
+    def _process_speech(self, row: dict[str, Any]) -> None:
+        """Transcribe one video and store its segments; no per-segment resume."""
+        file_id = int(row["id"])
+        path = Path(row["path"])
+        content_hash = row["hash"]
+        coverage = self.index.video_coverage(file_id)
+        if coverage is None:
+            # Indexed before coverage was recorded: probe once so the audio and
+            # duration checks below still apply.
+            info = probe_media(path)
+            self.index.record_probe(
+                file_id,
+                duration=info.duration,
+                has_audio=info.has_audio,
+                complete=1,
+                expected_hash=content_hash,
+            )
+            coverage = self.index.video_coverage(file_id)
+        if (
+            coverage is None
+            or not int(coverage["complete"] or 0)
+            or coverage["speech"] is not None
+        ):
+            return None
+        if row["status"] != "done":
+            return None
+        if not models.speech_ready(self.config.models_dir):
+            return None
+        if coverage["has_audio"] is not None and not int(coverage["has_audio"]):
+            self.index.set_speech_state(
+                file_id,
+                "skipped",
+                reason=SPEECH_NO_AUDIO_REASON,
+                expected_hash=content_hash,
+            )
+            return None
+        duration = coverage["duration"]
+        max_seconds = max(0, int(self.config.speech_max_minutes)) * 60
+        if duration is not None and max_seconds and float(duration) > max_seconds:
+            self.index.set_speech_state(
+                file_id,
+                "skipped",
+                reason=SPEECH_TOO_LONG_REASON,
+                expected_hash=content_hash,
+            )
+            return None
+
+        name = path.name
+        self._set_activity(f"Transcribing {name}", 0)
+        started = time.monotonic()
+        try:
+            from .extractors.speech import transcribe
+
+            segments = transcribe(
+                path,
+                models_dir=self.config.models_dir,
+                work_dir=self.config.data_dir,
+                threads=self.config.onnx_threads,
+                duration=None if duration is None else float(duration),
+                progress=lambda percent: self._set_activity(
+                    f"Transcribing {name}", percent
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - a restart retries this video
+            log.warning("Speech failed for %s: %s", path, exc)
+            return None
+        finally:
+            self._set_activity(None)
+
+        written = self.index.add_text_rows(
+            file_id,
+            [(text, start) for start, _end, text in segments],
+            source="speech",
+            expected_hash=content_hash,
+        )
+        if segments and written == 0:
+            # The file changed while whisper was running.
+            return None
+        if not self.index.set_speech_state(
+            file_id,
+            "done",
+            segments=len(segments),
+            expected_hash=content_hash,
+        ):
+            return None
+        current = self.index.get_file(file_id)
+        if current is None:
+            return None
+        stages = {
+            stage for stage in (current["stages_done"] or "").split(",") if stage
+        }
+        stages.add("speech")
+        self.index.mark_status(
+            file_id,
+            str(current["status"]),
+            current["error"],
+            stages_done=",".join(sorted(stages)),
+            expected_hash=content_hash,
+        )
+        log.info("Speech %s: %d segment(s)", path.name, len(segments))
+        elapsed = time.monotonic() - started
+        if duration:
+            log.info(
+                "Speech %s took %.1f s for %.0f s of audio (%.1fx realtime)",
+                path.name,
+                elapsed,
+                float(duration),
+                float(duration) / elapsed if elapsed else 0.0,
+            )
+        return None
 
     def _process_image(self, row: dict[str, Any]) -> None:
         file_id = int(row["id"])

@@ -26,6 +26,21 @@ def _count(index: Index, sql: str, parameters: tuple[object, ...] = ()) -> int:
     return int(index.conn.execute(sql, parameters).fetchone()[0])
 
 
+def test_filename_tokens_drop_dates_and_camera_noise() -> None:
+    from shotfinder.index import name_tokens
+
+    assert name_tokens("Pulizia disco 2026-09-25 21-19-47.mp4") == [
+        "pulizia",
+        "disco",
+    ]
+    assert name_tokens("IMG_2024_ScreenRecording_2026-09-25 21-19-47.png") == [
+        "screen",
+        "recording",
+    ]
+    assert name_tokens("camelCaseVideo.mov") == ["camel", "case", "video"]
+    assert name_tokens("DSC_0042.JPG") == []
+
+
 def test_insert_and_search(index: Index, tmp_path: Path) -> None:
     path = _make_file(tmp_path / "screenshot.png", b"first file")
     file_id, changed = index.upsert_file(path, "image")
@@ -131,7 +146,14 @@ def test_modified_file_resets_stages_and_text(index: Index, tmp_path: Path) -> N
     assert row["stages_done"] == ""
     assert row["error"] is None
     assert index.search_text("old") == []
-    assert _count(index, "SELECT COUNT(*) FROM text_fts WHERE file_id = ?", (file_id,)) == 0
+    assert (
+        _count(
+            index,
+            "SELECT COUNT(*) FROM text_fts WHERE file_id = ? AND source != 'name'",
+            (file_id,),
+        )
+        == 0
+    )
 
 
 def test_delete_cascades_to_text_and_vectors(index: Index, tmp_path: Path) -> None:
@@ -149,7 +171,14 @@ def test_delete_cascades_to_text_and_vectors(index: Index, tmp_path: Path) -> No
             (vector_rowid, sqlite_vec.serialize_float32([0.0] * 512)),
         )
 
-    assert _count(index, "SELECT COUNT(*) FROM text_fts WHERE file_id = ?", (file_id,)) == 1
+    assert (
+        _count(
+            index,
+            "SELECT COUNT(*) FROM text_fts WHERE file_id = ? AND source != 'name'",
+            (file_id,),
+        )
+        == 1
+    )
     assert _count(index, "SELECT COUNT(*) FROM vec_meta WHERE file_id = ?", (file_id,)) == 1
     assert _count(index, "SELECT COUNT(*) FROM vec_items WHERE rowid = ?", (vector_rowid,)) == 1
 
@@ -210,3 +239,162 @@ def test_vision_backfill_lists_only_done_images_without_vectors(
 
     assert [row["id"] for row in backfill] == [ocr_id]
     assert pending_id not in {row["id"] for row in backfill}
+
+
+def test_filename_words_are_searchable(index: Index, tmp_path: Path) -> None:
+    path = _make_file(tmp_path / "Pulizia disco 2026-09-25 21-19-47.mp4", b"video")
+    file_id, _ = index.upsert_file(path, "video")
+
+    hits = index.search_text("pulizia disco")
+
+    assert [hit["file_id"] for hit in hits] == [file_id]
+    assert hits[0]["source"] == "name"
+    assert hits[0]["ts"] is None
+    assert "pulizia" in hits[0]["snippet"]
+
+
+def test_rename_refreshes_the_name_row(index: Index, tmp_path: Path) -> None:
+    old = _make_file(tmp_path / "alpha.mp4", b"same bytes")
+    file_id, _ = index.upsert_file(old, "video")
+
+    new = tmp_path / "beta.mp4"
+    old.rename(new)
+    moved_id, changed = index.upsert_file(new, "video")
+
+    assert moved_id == file_id
+    assert changed is False
+    assert index.search_text("alpha") == []
+    assert index.search_text("beta")[0]["file_id"] == file_id
+
+
+def test_backfill_names_adds_rows_for_old_files(index: Index, tmp_path: Path) -> None:
+    path = _make_file(tmp_path / "vecchio nome.png", b"image")
+    file_id, _ = index.upsert_file(path, "image")
+    with index.conn as connection:
+        connection.execute("DELETE FROM text_fts WHERE file_id = ?", (file_id,))
+
+    assert index.search_text("vecchio") == []
+    assert index.backfill_names() == 1
+    assert index.search_text("vecchio")[0]["file_id"] == file_id
+    assert index.backfill_names() == 0
+
+
+def _video_with_coverage(
+    index: Index,
+    path: Path,
+    *,
+    complete: int = 1,
+    has_audio: int = 1,
+    duration: float = 100.0,
+    speech: str | None = None,
+) -> int:
+    path.write_bytes(path.name.encode())
+    file_id, _ = index.upsert_file(path, "video")
+    index.add_video_frames(
+        file_id,
+        [],
+        next_ts=duration,
+        kept=1,
+        last_hash=None,
+        coverage={
+            "duration": duration,
+            "interval": 5.0,
+            "sampled": 1,
+            "kept": 1,
+            "last_ts": 0.0,
+            "complete": complete,
+            "has_audio": has_audio,
+            "speech": speech,
+        },
+    )
+    index.mark_status(file_id, "done", stages_done="frames")
+    return file_id
+
+
+def test_speech_pending_skips_silent_long_and_finished_videos(
+    index: Index, tmp_path: Path
+) -> None:
+    ready = _video_with_coverage(index, tmp_path / "ready.mp4")
+    silent = _video_with_coverage(index, tmp_path / "silent.mp4", has_audio=0)
+    long = _video_with_coverage(
+        index, tmp_path / "long.mp4", duration=7200.0
+    )
+    done = _video_with_coverage(
+        index, tmp_path / "done.mp4", speech="done"
+    )
+    unfinished = _video_with_coverage(
+        index, tmp_path / "partial.mp4", complete=0
+    )
+
+    assert index.next_speech_pending(3600) == [ready]
+    # 0 disables the duration cap, but not the audio or state filters.
+    assert index.next_speech_pending(0) == [ready, long]
+    assert silent not in index.next_speech_pending(0)
+    assert done not in index.next_speech_pending(0)
+    assert unfinished not in index.next_speech_pending(0)
+
+    # Indexed before coverage existed: no row yet, but frames are done.
+    legacy = _make_file(tmp_path / "legacy.mp4", b"legacy")
+    legacy_id, _ = index.upsert_file(legacy, "video")
+    index.mark_status(legacy_id, "done", stages_done="frames")
+    assert legacy_id in index.next_speech_pending(3600)
+
+
+def test_truncated_videos_reset_only_the_frames_stage(
+    index: Index, tmp_path: Path
+) -> None:
+    path = _make_file(tmp_path / "long.mp4", b"long video")
+    file_id, _ = index.upsert_file(path, "video")
+    index.add_video_frames(
+        file_id,
+        [(0.0, [0.0] * 512)],
+        next_ts=1500.0,
+        kept=300,
+        last_hash=None,
+        coverage={
+            "duration": 7200.0,
+            "interval": 24.0,
+            "sampled": 300,
+            "kept": 300,
+            "last_ts": 7176.0,
+            "complete": 0,
+            "has_audio": 1,
+            "speech": "done",
+            "speech_segments": 4,
+        },
+    )
+    index.add_text_rows(file_id, [("keep this line", 12.0)], source="speech")
+    index.mark_status(file_id, "done", stages_done="frames,speech")
+
+    assert index.reset_truncated_videos() == [file_id]
+
+    row = index.get_file(file_id)
+    assert row["status"] == "pending"
+    assert row["stages_done"] == "speech"
+    coverage = index.video_coverage(file_id)
+    assert coverage["complete"] == 0
+    assert coverage["duration"] is None
+    assert coverage["speech"] == "done"
+    # Speech text survives: only frames are re-sampled.
+    assert index.search_text("keep")[0]["file_id"] == file_id
+    # While it is pending it is not reset a second time.
+    assert index.reset_truncated_videos() == []
+
+
+def test_legacy_videos_with_300_vectors_are_treated_as_truncated(
+    index: Index, tmp_path: Path
+) -> None:
+    path = _make_file(tmp_path / "legacy-long.mp4", b"legacy long")
+    file_id, _ = index.upsert_file(path, "video")
+    index.add_video_frames(
+        file_id,
+        [(float(i), [0.0] * 512) for i in range(300)],
+        next_ts=1500.0,
+        kept=300,
+        last_hash=None,
+    )
+    index.mark_status(file_id, "done", stages_done="frames")
+
+    assert index.reset_truncated_videos() == [file_id]
+    assert index.video_progress(file_id) is None
+    assert index.get_file(file_id)["status"] == "pending"

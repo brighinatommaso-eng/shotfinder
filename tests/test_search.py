@@ -126,14 +126,15 @@ def test_duplicate_rows_do_not_inflate_score() -> None:
     assert results.matches[1]["score"] == pytest.approx(1 / 62)
 
 
-def test_best_timestamp_follows_the_better_rank() -> None:
+def test_timed_text_owns_the_jump_point() -> None:
     text = [_text(9, "other.png"), _text(1, "video.mp4", ts=10.0)]
     vectors = [_vector(1, 0.1, "video.mp4", ts=5.0, kind="video")]
 
     results = combine(text, vectors)
 
     assert results.matches[0]["file_id"] == 1
-    assert results.matches[0]["ts"] == 5.0
+    # A spoken line is what the user asked for, even when a frame ranks higher.
+    assert results.matches[0]["ts"] == 10.0
     assert results.matches[0]["match_type"] == MATCH_BOTH
 
 
@@ -259,3 +260,51 @@ def test_text_only_when_models_are_missing(tmp_path: Path) -> None:
     assert results.matches[0]["match_type"] == MATCH_TEXT
     assert results.matches[0]["cosine"] is None
     assert results.matches[0]["fts_rank"] == 1
+
+
+def test_filename_hit_is_a_match_not_a_related_suggestion(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    index = Index(config.db_path)
+    try:
+        path = tmp_path / "Pulizia disco 2026-09-25 21-19-47.mp4"
+        path.write_bytes(b"video")
+        file_id, _ = index.upsert_file(path, "video")
+        index.mark_status(file_id, "done", stages_done="frames")
+
+        results = search(config, index, "pulizia disco")
+    finally:
+        index.close()
+
+    assert [row["file_id"] for row in results.matches] == [file_id]
+    assert results.matches[0]["match_type"] == MATCH_TEXT
+    assert results.matches[0]["source"] == "name"
+    assert results.related == []
+
+
+def test_spoken_hit_keeps_its_timestamp_and_snippet(tmp_path: Path) -> None:
+    config = Config(data_dir=tmp_path)
+    index = Index(config.db_path)
+    try:
+        path = tmp_path / "tutorial.mp4"
+        path.write_bytes(b"video")
+        file_id, _ = index.upsert_file(path, "video")
+        index.add_text_rows(
+            file_id,
+            [
+                ("Welcome to this tutorial", 0.0),
+                ("Now we solder the battery connector", 754.0),
+            ],
+            source="speech",
+        )
+        index.mark_status(file_id, "done", stages_done="frames,speech")
+
+        results = search(config, index, "battery connector")
+    finally:
+        index.close()
+
+    match = results.matches[0]
+    assert match["file_id"] == file_id
+    assert match["match_type"] == MATCH_TEXT
+    assert match["source"] == "speech"
+    assert match["ts"] == pytest.approx(754.0)
+    assert "battery" in match["snippet"].lower()

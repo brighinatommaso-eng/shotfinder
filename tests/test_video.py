@@ -9,6 +9,7 @@ import pytest
 from shotfinder.extractors import video
 from shotfinder.extractors.video import (
     FRAME_INTERVAL,
+    MAX_KEPT_FRAMES,
     FrameCursor,
     VideoUnavailableError,
     extract_frame,
@@ -17,6 +18,8 @@ from shotfinder.extractors.video import (
     hash_to_hex,
     iter_frames,
     perceptual_hash,
+    probe_media,
+    sampling_interval,
 )
 
 
@@ -99,6 +102,37 @@ def test_perceptual_hash_roundtrip() -> None:
     assert hash_from_hex(None) is None
     assert hash_from_hex("not-hex") is None
     assert hamming_distance(0b1010, 0b0011) == 2
+
+
+def test_sampling_interval_spreads_the_cap_over_the_whole_video() -> None:
+    assert sampling_interval(None) == FRAME_INTERVAL
+    assert sampling_interval(0) == FRAME_INTERVAL
+    assert sampling_interval(80) == FRAME_INTERVAL
+    # 300 frames at 5 s only reach 25 minutes; a 2 h video needs 24 s.
+    assert sampling_interval(7200) == pytest.approx(7200 / MAX_KEPT_FRAMES)
+    assert sampling_interval(1500) == pytest.approx(1500 / MAX_KEPT_FRAMES)
+
+
+def test_probe_reports_duration_and_audio(scene_video: Path, tmp_path: Path) -> None:
+    info = probe_media(scene_video)
+    assert info.duration == pytest.approx(80.0, abs=0.5)
+    assert info.has_audio is False
+
+    silent = tmp_path / "broken.mp4"
+    silent.write_bytes(b"not a video")
+    assert probe_media(silent).duration is None
+
+
+def test_a_coarser_interval_still_reaches_the_end(scene_video: Path) -> None:
+    cursor = FrameCursor()
+
+    frames = list(iter_frames(scene_video, cursor, interval=10.0, max_side=64))
+
+    assert cursor.exhausted is True
+    assert frames[0].timestamp == 0.0
+    # Sampling covered the whole file even though dedup kept few frames.
+    assert cursor.next_ts >= 70.0
+    assert all(frame.timestamp % 10.0 == 0 for frame in frames)
 
 
 def test_identical_images_hash_the_same() -> None:

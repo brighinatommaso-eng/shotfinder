@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import html
 from datetime import datetime
 from pathlib import Path
+
+_HIGHLIGHT_OPEN = '<span style="background-color: rgba(76, 194, 255, 0.30);">'
 
 
 def format_date(timestamp: float | None) -> str:
@@ -41,6 +44,43 @@ def clean_snippet(snippet: str | None, limit: int = 160) -> str:
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text
+
+
+def highlight_snippet(snippet: str | None, limit: int = 160) -> str:
+    """Render an FTS snippet as rich text with the matched words highlighted.
+
+    ``snippet()`` marks each match with ``[...]``; those markers become spans.
+    The result is HTML-escaped, and a truncated snippet closes any open span.
+    """
+    if not snippet:
+        return ""
+    text = " ".join(snippet.replace("\u2026", " ").split())
+    parts: list[str] = []
+    visible = 0
+    open_span = False
+    truncated = False
+    for character in text:
+        if character == "[":
+            if visible >= limit:
+                truncated = True
+                break
+            parts.append(_HIGHLIGHT_OPEN)
+            open_span = True
+        elif character == "]":
+            if open_span:
+                parts.append("</span>")
+                open_span = False
+        else:
+            if visible >= limit:
+                truncated = True
+                break
+            parts.append(html.escape(character))
+            visible += 1
+    if open_span:
+        parts.append("</span>")
+    if truncated:
+        parts.append("…")
+    return "".join(parts)
 
 
 def folder_label(path: str) -> str:

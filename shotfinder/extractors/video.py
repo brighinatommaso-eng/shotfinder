@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -31,10 +32,64 @@ THUMBNAIL_MAX_SIDE = 256
 HASH_DISTANCE = 6
 MAX_KEPT_FRAMES = 300
 _PIXEL_FORMAT = "rgb24"
+_DURATION_RE = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
 class VideoUnavailableError(RuntimeError):
     """Raised when ffmpeg is missing or cannot decode a file."""
+
+
+@dataclass(frozen=True, slots=True)
+class MediaInfo:
+    """What ffmpeg reports before any frame is decoded."""
+
+    duration: float | None
+    has_audio: bool
+
+
+def probe_media(path: str | Path) -> MediaInfo:
+    """Read duration and audio presence from the bundled ffmpeg.
+
+    ``imageio-ffmpeg`` ships ffmpeg but not ffprobe; ``ffmpeg -i`` prints the
+    same stream header to stderr and exits without decoding.
+    """
+    executable = ffmpeg_path()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            [executable, "-hide_banner", "-i", str(path)],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log.debug("Could not probe %s", path, exc_info=True)
+        return MediaInfo(None, False)
+    text = result.stderr.decode("utf-8", "replace")
+    match = _DURATION_RE.search(text)
+    duration = None
+    if match:
+        duration = (
+            int(match.group(1)) * 3600
+            + int(match.group(2)) * 60
+            + float(match.group(3))
+        )
+    has_audio = any(
+        "Stream #" in line and "Audio:" in line for line in text.splitlines()
+    )
+    return MediaInfo(duration, has_audio)
+
+
+def sampling_interval(duration: float | None) -> float:
+    """Spread at most :data:`MAX_KEPT_FRAMES` samples over the whole video.
+
+    Short videos keep the 5 s grid; a long one gets a coarser grid so its end is
+    still covered instead of being cut off at the frame cap.
+    """
+    if duration is None or duration <= 0:
+        return FRAME_INTERVAL
+    return max(FRAME_INTERVAL, duration / MAX_KEPT_FRAMES)
 
 
 @dataclass(slots=True)

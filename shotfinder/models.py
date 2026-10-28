@@ -22,11 +22,15 @@ log = logging.getLogger(__name__)
 IMAGE_MODEL_FILENAME = "clip_image_fp32.onnx"
 TEXT_MODEL_FILENAME = "clip_text_int8.onnx"
 TOKENIZER_FILENAME = "tokenizer.json"
+WHISPER_DIRECTORY = "whisper-base"
 
-# Release assets: https://github.com/brighinatommaso-eng/shotfinder/releases/tag/models-v1
-# SHOTFINDER_MODELS_DIR bypasses downloads entirely.
-MODEL_BASE_URL = (
-    "https://github.com/brighinatommaso-eng/shotfinder/releases/download/models-v1"
+# Release assets: https://github.com/brighinatommaso-eng/shotfinder/releases
+# models-v1 only ever shipped the CLIP assets, so the speech model lives in its
+# own release rather than changing an existing one.
+VISION_RELEASE = "models-v1"
+SPEECH_RELEASE = "models-v2"
+RELEASE_BASE_URL = (
+    "https://github.com/brighinatommaso-eng/shotfinder/releases/download"
 )
 
 _CHUNK = 1024 * 1024
@@ -34,16 +38,29 @@ _CHUNK = 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class ModelFile:
-    """One downloadable artifact."""
+    """One downloadable artifact.
+
+    ``filename`` is the release asset name; ``directory`` is the subfolder it
+    occupies under the models directory (empty for the flat CLIP files).
+    """
 
     name: str
     filename: str
     sha256: str
     size: int
+    release: str = VISION_RELEASE
+    directory: str = ""
 
     @property
     def url(self) -> str:
-        return f"{MODEL_BASE_URL}/{self.filename}"
+        return f"{RELEASE_BASE_URL}/{self.release}/{self.filename}"
+
+    @property
+    def relative_path(self) -> Path:
+        return Path(self.directory) / self.filename if self.directory else Path(self.filename)
+
+    def path_in(self, models_dir: str | Path) -> Path:
+        return Path(models_dir) / self.relative_path
 
 
 MODELS: tuple[ModelFile, ...] = (
@@ -67,6 +84,45 @@ MODELS: tuple[ModelFile, ...] = (
     ),
 )
 
+# Systran/faster-whisper-base converted to CTranslate2 (MIT). The four files
+# are what faster-whisper needs to load the model from a local directory.
+SPEECH_MODELS: tuple[ModelFile, ...] = (
+    ModelFile(
+        "whisper_config",
+        "config.json",
+        "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
+        2_309,
+        release=SPEECH_RELEASE,
+        directory=WHISPER_DIRECTORY,
+    ),
+    ModelFile(
+        "whisper_model",
+        "model.bin",
+        "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+        145_217_532,
+        release=SPEECH_RELEASE,
+        directory=WHISPER_DIRECTORY,
+    ),
+    ModelFile(
+        "whisper_tokenizer",
+        "tokenizer.json",
+        "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+        2_203_239,
+        release=SPEECH_RELEASE,
+        directory=WHISPER_DIRECTORY,
+    ),
+    ModelFile(
+        "whisper_vocabulary",
+        "vocabulary.txt",
+        "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+        459_861,
+        release=SPEECH_RELEASE,
+        directory=WHISPER_DIRECTORY,
+    ),
+)
+
+ALL_MODELS: tuple[ModelFile, ...] = MODELS + SPEECH_MODELS
+
 ProgressCallback = Callable[[ModelFile, int, int], None]
 
 
@@ -84,21 +140,33 @@ def sha256_file(path: str | Path) -> str:
 
 def _looks_present(models_dir: Path, model: ModelFile) -> bool:
     """Cheap check: existence plus exact size. Download does the real hash check."""
-    path = models_dir / model.filename
+    path = model.path_in(models_dir)
     try:
         return path.is_file() and path.stat().st_size == model.size
     except OSError:
         return False
 
 
-def missing_files(models_dir: str | Path) -> list[ModelFile]:
+def missing_files(
+    models_dir: str | Path, models: tuple[ModelFile, ...] = MODELS
+) -> list[ModelFile]:
     directory = Path(models_dir)
-    return [model for model in MODELS if not _looks_present(directory, model)]
+    return [model for model in models if not _looks_present(directory, model)]
 
 
 def models_ready(models_dir: str | Path) -> bool:
-    """True when every registered model is present with the expected size."""
+    """True when every vision model is present with the expected size."""
     return not missing_files(models_dir)
+
+
+def speech_ready(models_dir: str | Path) -> bool:
+    """True when the local Whisper model is present; never checked remotely."""
+    return not missing_files(models_dir, SPEECH_MODELS)
+
+
+def speech_model_dir(models_dir: str | Path) -> Path:
+    """The local directory faster-whisper loads from (no hub fallback)."""
+    return Path(models_dir) / WHISPER_DIRECTORY
 
 
 def _fetch(model: ModelFile, part: Path, progress: ProgressCallback | None) -> None:
@@ -146,9 +214,9 @@ def download_model(
 ) -> Path:
     """Download one model into *models_dir*, resuming a previous attempt."""
     directory = Path(models_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / model.filename
-    part = directory / (model.filename + ".part")
+    target = model.path_in(directory)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
 
     _fetch(model, part, progress)
 
@@ -172,13 +240,13 @@ def download_model(
 def download_models(
     models_dir: str | Path, progress: ProgressCallback | None = None
 ) -> list[Path]:
-    """Ensure every registered model exists locally; returns their paths."""
+    """Ensure every vision and speech model exists locally; returns their paths."""
     directory = Path(models_dir)
     directory.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    for model in MODELS:
+    for model in ALL_MODELS:
         if _looks_present(directory, model):
-            paths.append(directory / model.filename)
+            paths.append(model.path_in(directory))
             continue
         paths.append(download_model(model, directory, progress))
     return paths
