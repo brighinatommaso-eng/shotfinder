@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -40,7 +41,23 @@ INDEX_TIMEOUT_SECONDS = 900
 
 TEXT_QUERY = "ACME INVOICE"
 VISUAL_QUERY = "a colorful test pattern with bars"
-SPEECH_QUERY = "quick brown fox"
+# Whisper is an int8 model and a different CPU can spell a word differently
+# ("quick" -> "quik" on the CI runner). The spoken query therefore uses a word
+# from the transcript that was actually indexed, not a hard-coded phrase.
+MIN_SPEECH_WORD_LENGTH = 4
+
+
+def _longest_word(rows: list[list[Any]]) -> str | None:
+    """Return the longest alphabetic word in the indexed speech rows."""
+    words: list[str] = []
+    for _ts, content in rows:
+        words.extend(
+            word
+            for word in re.findall(r"[^\W\d_]+", str(content), flags=re.UNICODE)
+            if len(word) >= MIN_SPEECH_WORD_LENGTH
+        )
+    return max(words, key=len, default=None)
+
 
 
 class _Unavailable(RuntimeError):
@@ -576,23 +593,47 @@ class _Selftest:
         }
 
     def _check_speech_query(self) -> dict[str, Any]:
-        hit = self._search_hit(SPEECH_QUERY, "talk.mp4")
+        speech = self._speech_diagnostics()
+        rows = speech.get("rows") or []
+        if not rows:
+            raise RuntimeError(
+                "the speech stage produced no timed segments; "
+                f"speech={speech!r}"
+            )
+        query = _longest_word(rows)
+        if query is None:
+            raise RuntimeError(
+                f"the speech stage produced no searchable word; speech={speech!r}"
+            )
+        try:
+            hit = self._search_hit(query, "talk.mp4")
+        except RuntimeError as exc:
+            raise RuntimeError(f"{exc}; speech={speech!r}") from exc
         if hit["match_type"] not in ("text", "both"):
             raise RuntimeError(
-                f"{SPEECH_QUERY!r} matched {hit['match_type']}, expected speech text; "
-                f"speech={self._speech_diagnostics()!r}"
+                f"{query!r} matched {hit['match_type']}, expected speech text; "
+                f"speech={speech!r}"
             )
-        if hit.get("ts") is None:
+        if hit.get("ts") is None or hit.get("source") != "speech":
             raise RuntimeError(
-                f"{SPEECH_QUERY!r} matched talk.mp4 without a timestamp; "
-                f"speech={self._speech_diagnostics()!r}"
+                f"{query!r} matched talk.mp4 without a speech timestamp "
+                f"(source={hit.get('source')!r}); speech={speech!r}"
+            )
+        snippet = (hit.get("snippet") or "").lower()
+        if query.lower() not in snippet:
+            raise RuntimeError(
+                f"{query!r} matched talk.mp4 but its snippet {snippet!r} "
+                f"does not contain the word; speech={speech!r}"
             )
         return {
-            "query": SPEECH_QUERY,
+            "query": query,
             "path": hit["path"],
             "match_type": hit["match_type"],
             "ts": hit.get("ts"),
+            "source": hit.get("source"),
             "snippet": hit.get("snippet"),
+            "segments": len(rows),
+            "transcript": [content for _ts, content in rows],
         }
 
     def _search_hit(self, query: str, expected_name: str) -> dict[str, Any]:

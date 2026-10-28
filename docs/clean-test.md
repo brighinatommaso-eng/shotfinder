@@ -1,4 +1,4 @@
-# Clean-account test on a real Windows PC
+﻿# Clean-account test on a real Windows PC
 
 This checklist proves that the release zip works for a user who has never had
 Python, the Visual C++ runtime, the models or a ShotFinder index. It uses a
@@ -27,14 +27,14 @@ You need administrator rights to create and delete the test account.
    | --- | --- |
    | `invoice.png` | OCR text: `ACME INVOICE 2024` |
    | `pattern.png` | visual match for `a colorful test pattern with bars` |
-   | `talk.mp4` | speech: `quick brown fox`, spoken at about 0.7 s |
+   | `talk.mp4` | speech: `quick brown fox`, spoken at about 0.3 s |
 
 4. Make sure you know the password/PIN of your administrator account: you will
    sign out and back in several times.
 
 ## 1. Create the test account
 
-1. **Settings → Accounts → Other users → Add account**.
+1. **Settings â†’ Accounts â†’ Other users â†’ Add account**.
 2. Click **I don't have this person's sign-in information**, then **Add a user
    without a Microsoft account**.
 3. Username `ShotFinderTest`, choose a simple local password (or no password).
@@ -72,10 +72,10 @@ a required VC++ DLL is missing.
 
 1. Copy `ShotFinder-0.1.1-win64.zip` from
    `C:\Users\Public\Documents\ShotFinder-test\` to the Desktop.
-2. Right-click the zip → **Properties**. If **Unblock** is shown, tick it and
+2. Right-click the zip â†’ **Properties**. If **Unblock** is shown, tick it and
    click **Apply**. (A zip downloaded by a browser gets this; a file copied from
    a local folder may not.)
-3. Right-click → **Extract All…**, extract to the Desktop. You get
+3. Right-click â†’ **Extract Allâ€¦**, extract to the Desktop. You get
    `Desktop\ShotFinder\ShotFinder.exe`.
 4. Verify the download:
 
@@ -89,7 +89,7 @@ a required VC++ DLL is missing.
 
 1. Double-click `ShotFinder.exe`. There is no installer and no console window.
 2. Windows SmartScreen shows **Windows protected your PC** because the exe is
-   unsigned. Click **More info → Run anyway**. This dialog appears only once per
+   unsigned. Click **More info â†’ Run anyway**. This dialog appears only once per
    downloaded file.
 3. The **Welcome to ShotFinder** dialog appears once. It explains that everything
    stays on this PC, lists Screenshots, Pictures, Videos and Downloads with
@@ -113,11 +113,11 @@ a required VC++ DLL is missing.
 
 ## 5. Add the sample folder
 
-1. Right-click the tray icon → **Settings…**.
+1. Right-click the tray icon â†’ **Settingsâ€¦**.
 2. Under **Watched folders**, click **Add folder** and choose
    `C:\Users\Public\Documents\ShotFinder-test\samples`.
 3. Close Settings. Wait until indexing finishes: reopen Settings and check
-   **Index** — it should show 3 files, 0 errors, and the video's frames/speech.
+   **Index** â€” it should show 3 files, 0 errors, and the video's frames/speech.
    The first video takes a few seconds.
 
 ## 6. Hotkey and the three queries
@@ -131,13 +131,13 @@ a required VC++ DLL is missing.
    `pattern.png` appears under **Related by appearance** (visual-only results are
    suggestions, never confident matches).
 4. **Spoken:** clear the field and type `quick brown fox`. `talk.mp4` appears
-   with the spoken line and a timestamp around `0.7 s`.
+   with the spoken line and a timestamp around `0.3 s`.
 5. Press `Esc`. Press the hotkey again to confirm the window reopens.
 
 ## 7. Video preview
 
 1. Click the `talk.mp4` result. The player opens at or just before the matched
-   line; because this line is at 0.7 s, it starts at the beginning of the clip.
+   line; because this line is at 0.3 s, it starts at the beginning of the clip.
 2. Press `Space` to pause and play, then drag the seek bar (or use the arrow
    keys). The frame changes and the audio follows.
 3. Note any black/blank frame: it means the machine's codecs cannot decode that
@@ -157,7 +157,7 @@ a required VC++ DLL is missing.
 1. Double-click `ShotFinder.exe` again.
 2. The welcome dialog must **not** appear (the config already exists).
 3. The tray menu must **not** show **Download models** (the models are present).
-4. Open Settings → **Index**: the file/video counts are the same as before.
+4. Open Settings â†’ **Index**: the file/video counts are the same as before.
 5. Press `Ctrl+Alt+Space`, search `ACME INVOICE`, and confirm `invoice.png`
    returns immediately without a new scan.
 
@@ -165,7 +165,7 @@ a required VC++ DLL is missing.
 
 1. Quit ShotFinder from the tray.
 2. Sign out of `ShotFinderTest` and sign in as your administrator account.
-3. **Settings → Accounts → Other users → ShotFinderTest → Remove**, then choose
+3. **Settings â†’ Accounts â†’ Other users â†’ ShotFinderTest â†’ Remove**, then choose
    **Delete account and data**. This deletes `C:\Users\ShotFinderTest`,
    including `%LOCALAPPDATA%\ShotFinder` (index, models, logs).
 4. If Windows leaves `C:\Users\ShotFinderTest` behind, delete it manually.
