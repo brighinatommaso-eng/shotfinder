@@ -758,12 +758,24 @@ class Index:
                 ).fetchone()
                 if unchanged is None:
                     return False
+            stats = connection.execute(
+                "SELECT COUNT(*), MAX(ts) FROM vec_meta WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            kept = int(stats[0] or 0)
+            last_ts = stats[1]
+            # Legacy sampling used the 5 s grid until the end of the file, so
+            # the grid size is the number of samples that were attempted.
+            sampled = int(duration // 5.0) + 1 if duration else kept
             self._upsert_coverage(
                 connection,
                 file_id,
                 {
                     "duration": duration,
                     "interval": 5.0,
+                    "sampled": sampled,
+                    "kept": kept,
+                    "last_ts": last_ts,
                     "complete": int(complete),
                     "has_audio": int(has_audio),
                 },

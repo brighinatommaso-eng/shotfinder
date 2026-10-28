@@ -398,3 +398,27 @@ def test_legacy_videos_with_300_vectors_are_treated_as_truncated(
     assert index.reset_truncated_videos() == [file_id]
     assert index.video_progress(file_id) is None
     assert index.get_file(file_id)["status"] == "pending"
+
+
+def test_record_probe_reports_the_sampling_from_the_vectors(
+    index: Index, tmp_path: Path
+) -> None:
+    path = _make_file(tmp_path / "legacy.mp4", b"legacy")
+    file_id, _ = index.upsert_file(path, "video")
+    index.add_video_frames(
+        file_id,
+        [(0.0, [0.0] * 512), (10.0, [0.0] * 512)],
+        next_ts=15.0,
+        kept=2,
+        last_hash=None,
+    )
+    index.mark_status(file_id, "done", stages_done="frames")
+
+    assert index.record_probe(file_id, duration=20.0, has_audio=True)
+
+    coverage = index.video_coverage(file_id)
+    assert coverage["sampled"] == 5
+    assert coverage["kept"] == 2
+    assert coverage["last_ts"] == 10.0
+    assert coverage["complete"] == 1
+    assert coverage["has_audio"] == 1
